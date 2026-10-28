@@ -14,7 +14,8 @@ import os
 import cv2
 import numpy as np
 
-from torchvision import transforms as transforms
+import torch
+from torchvision.transforms import v2
 from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
@@ -123,6 +124,9 @@ def compose_data_transforms(height, width, mean, std):
 
     The training transforms include data augmentation such as random horizontal flipping and random affine transformations,
     while the validation/test transforms consist solely of resizing, converting to tensor, and normalizing.
+    These are torchvision.transforms.v2 transforms applied by VideoDataset to a whole clip (a uint8
+    tensor of shape (T, C, H, W)) in one call, so a clip is flipped or shifted as a whole; the
+    hand-over's per-frame transforms flipped and shifted each frame on its own.
 
     Args:
         height (int): Desired image height.
@@ -135,22 +139,45 @@ def compose_data_transforms(height, width, mean, std):
             - train_transforms: Composed transforms for the training set.
             - val_test_transforms: Composed transforms for the validation/test set.
     """
-    train_transforms = transforms.Compose([
-        transforms.Resize((height, width)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
+    train_transforms = v2.Compose([
+        v2.Resize((height, width)),
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean, std),
     ])
-    val_test_transforms = transforms.Compose([
-        transforms.Resize((height, width)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
+    val_test_transforms = v2.Compose([
+        v2.Resize((height, width)),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean, std),
     ])
     return train_transforms, val_test_transforms
 
 
-def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn'):
+def make_dloader(dataset, batch_size, shuffle, collate_fn, num_workers):
+    """
+    Build a DataLoader that decodes clips in worker processes.
+
+    The hand-over used the DataLoader defaults (num_workers=0), so every JPEG was decoded in the
+    training process while the GPU waited; with workers the decoding overlaps with the GPU work.
+    pin_memory speeds up the host-to-GPU copy.
+
+    Args:
+        dataset (Dataset): The dataset to load from.
+        batch_size (int): Number of clips per batch.
+        shuffle (bool): Shuffle every epoch (training only).
+        collate_fn (callable): Function that turns a list of samples into a batch.
+        num_workers (int): Number of loader worker processes (0 loads in the main process).
+
+    Returns:
+        DataLoader: The configured DataLoader.
+    """
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn,
+                      num_workers=num_workers, pin_memory=True,
+                      persistent_workers=num_workers > 0)
+
+
+def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn', num_workers=0):
     """
     Create DataLoaders for training and validation datasets.
 
@@ -163,25 +190,19 @@ def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn'):
         val_dataset (Dataset): PyTorch Dataset for validation data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
+        num_workers (int): Number of loader worker processes.
 
     Returns:
         dict: Dictionary with keys 'train' and 'val' mapping to their respective DataLoaders.
     """
-    if model == "lrcn":
-        train_dl = DataLoader(train_dataset, batch_size=batch_size,
-                              shuffle=True, collate_fn=collate_fn_rnn)
-        val_dl = DataLoader(val_dataset, batch_size=2 * batch_size,
-                            shuffle=False, collate_fn=collate_fn_rnn)
-    else:
-        train_dl = DataLoader(train_dataset, batch_size=batch_size,
-                              shuffle=True, collate_fn=collate_fn_r3d_18)
-        val_dl = DataLoader(val_dataset, batch_size=2 * batch_size,
-                            shuffle=False, collate_fn=collate_fn_r3d_18)
+    collate_fn = collate_fn_rnn if model == "lrcn" else collate_fn_r3d_18
+    train_dl = make_dloader(train_dataset, batch_size, True, collate_fn, num_workers)
+    val_dl = make_dloader(val_dataset, 2 * batch_size, False, collate_fn, num_workers)
     dataloaders = {'train': train_dl, 'val': val_dl}
     return dataloaders
 
 
-def test_dloaders(test_dataset, batch_size, model='lrcn'):
+def test_dloaders(test_dataset, batch_size, model='lrcn', num_workers=0):
     """
     Create a DataLoader for the test dataset.
 
@@ -192,16 +213,13 @@ def test_dloaders(test_dataset, batch_size, model='lrcn'):
         test_dataset (Dataset): PyTorch Dataset for test data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
+        num_workers (int): Number of loader worker processes.
 
     Returns:
         dict: Dictionary with key 'test' mapping to the test DataLoader.
     """
-    if model == "lrcn":
-        test_dl = DataLoader(test_dataset, batch_size=2 * batch_size,
-                             shuffle=False, collate_fn=collate_fn_rnn)
-    else:
-        test_dl = DataLoader(test_dataset, batch_size=2 * batch_size,
-                             shuffle=False, collate_fn=collate_fn_r3d_18)
+    collate_fn = collate_fn_rnn if model == "lrcn" else collate_fn_r3d_18
+    test_dl = make_dloader(test_dataset, 2 * batch_size, False, collate_fn, num_workers)
     dataloaders = {'test': test_dl}
     return dataloaders
 

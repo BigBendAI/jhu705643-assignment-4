@@ -5,16 +5,13 @@ This module provides classes and functions for loading and processing video data
 splitting them into training, validation, and test sets, and preparing data for video
 classification models. It includes a custom PyTorch Dataset for videos stored as directories
 of frame images, functions to load the dataset from a directory structure, split the dataset
-by person group into cross-validation folds and save/load a split as a CSV, and custom collate
-functions for handling variable-length video sequences.
+by person group into cross-validation folds and save/load a split as a CSV, and the collate
+functions that turn a list of clips into a batch.
 """
 
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms as transforms
-from torch.nn.utils.rnn import pad_sequence
-
-from PIL import Image
+from torchvision.io import decode_image, ImageReadMode
 
 import os
 import re
@@ -32,14 +29,42 @@ class VideoDataset(Dataset):
     The dataset is provided as a dictionary mapping each video directory path to its label.
     
     Args:
-        vid_dataset (dict): Dictionary where keys are video directory paths and values are integer labels.
-        fr_per_vid (int): Number of frames per video to load (images are taken in order).
-        transforms (callable, optional): A function/transform to apply to each frame image (e.g., resizing, normalization).
+        vid_dataset (list): List of (video directory path, integer label) pairs.
+        fr_per_vid (int): Number of frames per video to load, in time order.
+        transforms (callable, optional): A transform applied to the whole clip at once, a uint8
+            tensor of shape (T, C, H, W). torchvision.transforms.v2 transforms treat the clip as
+            a batch of images and draw their random parameters once, so every frame of a clip
+            gets the same flip and shift.
+        random_clip (bool, optional): How to pick fr_per_vid frames out of the stored frames.
+            False: evenly spaced positions, the same every time (validation and test). True: the
+            stored frames are cut into fr_per_vid equal segments and one frame is drawn at random
+            from each segment every time the clip is loaded, so each epoch trains on a different
+            clip of the same video (training). Default is False.
     """
-    def __init__(self, vid_dataset, fr_per_vid, transforms=None):
+    def __init__(self, vid_dataset, fr_per_vid, transforms=None, random_clip=False):
         self.dataset = vid_dataset
         self.fpv = fr_per_vid
         self.transforms = transforms
+        self.random_clip = random_clip
+
+    def frame_indices(self, n_stored):
+        """
+        Positions of the fr_per_vid frames to load out of n_stored stored frames.
+
+        Args:
+            n_stored (int): Number of frame files in the clip directory.
+
+        Returns:
+            ndarray: fr_per_vid indices in increasing order.
+        """
+        if not self.random_clip or n_stored <= self.fpv:
+            # Evenly spaced; repeats when fewer frames are stored, so every clip has the length.
+            return np.linspace(0, n_stored - 1, self.fpv).round().astype(int)
+        # One random frame per segment. torch's random generator is seeded per DataLoader
+        # worker, so the workers do not all draw the same frames.
+        edges = np.linspace(0, n_stored, self.fpv + 1).astype(int)
+        offsets = torch.rand(self.fpv).numpy() * (edges[1:] - edges[:-1])
+        return edges[:-1] + offsets.astype(int)
 
     def __len__(self):
         """Return the number of video samples in the dataset."""
@@ -47,34 +72,31 @@ class VideoDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Load frames from the video directory corresponding to the given index, apply transforms,
-        and return the stacked tensor of frames along with its label.
-        
+        Load fr_per_vid frames of the video at the given index in time order, apply the clip
+        transform, and return the clip tensor along with its label.
+
         Args:
             idx (int): Index of the sample.
-            
+
         Returns:
             tuple: (frames_tensor, label) where frames_tensor is a tensor of shape (T, C, H, W)
-                   with T being the number of frames (up to fr_per_vid) and label is an integer.
+                   with T = fr_per_vid and label is an integer.
         """
-        # Get all JPEG frame paths from the video directory and select up to fr_per_vid frames
-        fr_paths = glob.glob(self.dataset[idx][0] + '/*.jpg')
-        fr_paths = fr_paths[:self.fpv]
-        
-        # Open images using PIL
-        fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
-        
-        # Get the label associated with the video
-        fr_label = self.dataset[idx][1]
-        
-        # Apply transforms to each frame if provided, else keep original images
-        fr_imgs_trans = [self.transforms(fr_img) for fr_img in fr_imgs] if self.transforms else fr_imgs
+        # The frame files in time order. glob returns directory order, which is arbitrary, so the
+        # hand-over fed the LSTM shuffled frames; the names are zero-padded, so sorting fixes it.
+        fr_paths = sorted(glob.glob(os.path.join(self.dataset[idx][0], '*.jpg')))
+        if not fr_paths:
+            raise FileNotFoundError(f'No frames found in {self.dataset[idx][0]}')
 
-        # Stack transformed images into a tensor if available
-        if len(fr_imgs_trans) > 0:
-            fr_imgs_trans = torch.stack(fr_imgs_trans)
+        # fr_per_vid of the stored frames (see frame_indices), decoded into one uint8 tensor
+        fr_idx = self.frame_indices(len(fr_paths))
+        fr_imgs = torch.stack([decode_image(fr_paths[i], mode=ImageReadMode.RGB) for i in fr_idx])
 
-        return fr_imgs_trans, fr_label
+        # Transform the whole clip at once (same random flip/shift for all of its frames)
+        if self.transforms:
+            fr_imgs = self.transforms(fr_imgs)
+
+        return fr_imgs, self.dataset[idx][1]
 
 
 def load_dataset(frame_dir):
@@ -254,35 +276,20 @@ def collate_fn_r3d_18(batch):
 
 def collate_fn_rnn(batch):
     """
-    Collate function for RNN-based models.
-    
-    Handles variable-length video sequences by padding them to the length of the longest sequence
-    in the batch. Each sample in the batch is expected to be a tuple (video_frames, label),
-    where video_frames is a tensor of shape (T, C, H, W). The function returns a padded tensor
-    of video frames with shape (batch_size, max_T, C, H, W) and a tensor of labels.
-    
+    Collate function for the LRCN.
+
+    Every clip from VideoDataset has the same number of frames, so the clips are simply stacked
+    into a tensor of shape (batch_size, T, C, H, W) next to a tensor of labels. (The hand-over
+    padded variable-length clips and silently dropped empty ones; VideoDataset now raises on an
+    empty clip directory instead.)
+
     Args:
         batch (list): List of samples, each as (video_frames, label).
-    
+
     Returns:
-        tuple: (padded_imgs, labels_tensor)
-            - padded_imgs (Tensor): Padded tensor of video frames.
+        tuple: (imgs_tensor, labels_tensor)
+            - imgs_tensor (Tensor): Stacked clips, shape (batch_size, T, C, H, W).
             - labels_tensor (Tensor): Tensor of labels.
     """
-    # Unzip the batch into image tensors and labels
-    imgs_batch, label_batch = list(zip(*batch))
-    
-    # Filter out any samples that have no frames
-    valid_samples = [(imgs, label) for imgs, label in zip(imgs_batch, label_batch) if len(imgs) > 0]
-    if not valid_samples:
-        return None, None
-    imgs_batch, label_batch = zip(*valid_samples)
-    
-    # Pad the video frame tensors along the time dimension (T)
-    # Resulting shape: (batch_size, max_T, C, H, W)
-    padded_imgs = pad_sequence(imgs_batch, batch_first=True)
-    
-    # Convert labels to a tensor
-    labels_tensor = torch.tensor(label_batch)
-    
-    return padded_imgs, labels_tensor
+    imgs_batch, label_batch = zip(*batch)
+    return torch.stack(imgs_batch), torch.tensor(label_batch)

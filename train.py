@@ -20,14 +20,19 @@ from tqdm import tqdm
 import torch
 import wandb
 
-def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30):
+from evaluate import evaluate
+
+def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30,
+          class_names=None):
     """
     Train and validate the model over a given number of epochs.
     
     This function performs the training loop for a video classification model.
     It iterates through the specified number of epochs, updates model weights
     using backpropagation, and evaluates model performance on a validation set.
-    The model with the best validation accuracy is saved to disk.
+    The model with the best validation accuracy is saved to disk as best.pt, the weights after the
+    last epoch as last.pt. At the end the best weights are reloaded and, when a Weights & Biases
+    run is active, their confusion matrices on the validation and test sets are logged.
 
     Args:
         dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders, optionally 'test'
@@ -39,6 +44,7 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         device (torch.device): Device (CPU or GPU) on which to perform training.
         optim_model_wts_dir (str): Directory to save the best model weights.
         n_epochs (int, optional): Number of training epochs. Default is 30.
+        class_names (list, optional): Class names in label order, for the confusion matrices.
 
     Returns:
         tuple: (model, loss_hist, acc_hist)
@@ -69,10 +75,9 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         if val_accuracy > best_val_acc:
             best_val_acc = val_accuracy
             best_model_wts = copy.deepcopy(model.state_dict())
-            best_model_name = 'best_model_wts.pt'
-            best_model_path = os.path.join(optim_model_wts_dir, best_model_name)
-            torch.save(best_model_wts, best_model_path)
+            torch.save(best_model_wts, os.path.join(optim_model_wts_dir, 'best.pt'))
             print('Best model weights are updated at epoch {}!'.format(epoch+1))
+        torch.save(model.state_dict(), os.path.join(optim_model_wts_dir, 'last.pt'))
         loss_hist['val'].append(val_loss)
         acc_hist['val'].append(val_accuracy)
 
@@ -105,7 +110,26 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
 
     # Load the best model weights before returning the model
     model.load_state_dict(best_model_wts)
+    if wandb.run is not None:
+        log_confusion_matrices(model, dataloaders, device, class_names)
     return model, loss_hist, acc_hist
+
+
+def log_confusion_matrices(model, dataloaders, device, class_names):
+    """
+    Log a Weights & Biases confusion matrix of the current weights for the val and test sets.
+
+    Args:
+        model (torch.nn.Module): The model to evaluate (the best-validation weights).
+        dataloaders (dict): DataLoaders by name; 'val' and, if present, 'test' are used.
+        device (torch.device): Device on which to run the model.
+        class_names (list): Class names in label order (None for numeric labels).
+    """
+    for name in ('val', 'test'):
+        if name in dataloaders:
+            targets, outputs, _ = evaluate(model, dataloaders[name], device)
+            wandb.log({f'{name}/confusion_matrix': wandb.plot.confusion_matrix(
+                y_true=targets, preds=outputs, class_names=class_names)})
 
 def get_learning_rate(optimizer):
     """

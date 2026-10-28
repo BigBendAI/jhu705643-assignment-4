@@ -36,7 +36,7 @@ from video_datasets import VideoDataset, split_overlap, read_split_csv
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
 from models import LRCN
 from train import train
-from test import test, get_test_report, get_confusion_matrix
+from evaluate import evaluate, get_test_report
 
 def args_parser():
     """
@@ -70,6 +70,8 @@ def args_parser():
                         help='cross-validation fold: the split is read from <split_dir>/fold<N>.csv')
     parser.add_argument('--split_dir', default='splits', help='folder of the fold CSVs')
     parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
+    parser.add_argument('--num_workers', type=int, default=16,
+                        help='DataLoader worker processes that decode the frames (0: main process)')
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
 
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
@@ -178,11 +180,13 @@ def main(args):
 
         # Create PyTorch Datasets and DataLoaders for train, validation and test. The test loader is
         # only used to log test loss/accuracy per epoch; model selection uses validation.
-        tr_dataset = VideoDataset(tr_split, fr_per_vid, tr_transforms)
+        # Training draws a random clip of each video every epoch; val and test use a fixed clip
+        tr_dataset = VideoDataset(tr_split, fr_per_vid, tr_transforms, random_clip=True)
         val_dataset = VideoDataset(val_split, fr_per_vid, val_ts_transforms)
         ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
-        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type)
-        dataloaders.update(test_dloaders(ts_dataset, batch_size, model_type))
+        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type,
+                                         args.num_workers)
+        dataloaders.update(test_dloaders(ts_dataset, batch_size, model_type, args.num_workers))
 
         # Define the loss function, optimizer, and learning rate scheduler
         loss_func = nn.CrossEntropyLoss(reduction='sum')
@@ -194,7 +198,9 @@ def main(args):
         # Main training procedure, with every epoch logged to Weights & Biases
         wandb.init(project=args.wandb_project, name=args.run_name, config=vars(args))
         model.to(device)
-        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs)
+        class_names = sorted(os.listdir(frame_dir))
+        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device,
+                                           optim_model_dir, n_epochs, class_names)
         wandb.finish()
 
     elif mode == 'eval':
@@ -203,17 +209,21 @@ def main(args):
 
         # Create PyTorch Dataset and DataLoader for the test set
         ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
-        dataloaders = test_dloaders(ts_dataset, batch_size, model_type)
+        dataloaders = test_dloaders(ts_dataset, batch_size, model_type, args.num_workers)
 
         # Load the trained model checkpoint
         model.load_state_dict(torch.load(args.ckpt, map_location=device))
         model.to(device)
-        targets, outputs, accuracy = test(model, dataloaders['test'], device)
+        targets, outputs, accuracy = evaluate(model, dataloaders['test'], device)
 
-        print('The overall test accuracy is {:.4f}%.'.format(100 * accuracy))
-        # Optionally, generate a detailed test report or confusion matrix:
-        # print(get_test_report(targets, outputs, all_cats))
-        # print(get_confusion_matrix(targets, outputs, labels_dict, all_cats))
+        print(f'The overall test accuracy is {100 * accuracy:.4f}%.')
+        # Per-class recall, worst classes first, from the class folder names
+        class_names = sorted(os.listdir(frame_dir))
+        report = get_test_report(targets, outputs, class_names)
+        print('Lowest per-class recall:')
+        for name in sorted(class_names, key=lambda n: report[n]['recall'])[:5]:
+            print(f"  {name:20s} recall {100 * report[name]['recall']:.1f}%  "
+                  f"(n={int(report[name]['support'])})")
 
     else:
         raise ValueError('The mode argument must be either "train" or "eval".')

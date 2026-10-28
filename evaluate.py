@@ -1,12 +1,14 @@
 """
-Module: test.py
+Module: evaluate.py
 
-This module provides functions for evaluating a video classification model on test data.
+This module provides functions for evaluating a video classification model on held-out data.
+(It was test.py in the hand-over; that name clashes with pytest's test files and with Python's
+own test package.)
 It includes functions to compute predictions and accuracy, generate a detailed classification report,
 and compute a multilabel confusion matrix for all classes.
 
 Functions:
-    - test: Evaluates the model on a test DataLoader and returns the ground truth labels,
+    - evaluate: Evaluates the model on a DataLoader and returns the ground truth labels,
       predicted labels, and overall accuracy.
     - get_test_report: Generates a classification report using scikit-learn's classification_report.
     - get_confusion_matrix: Computes a multilabel confusion matrix for each class.
@@ -16,9 +18,9 @@ import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
 
-def test(model, dataloader, device):
+def evaluate(model, dataloader, device):
     """
-    Evaluate the model on the test dataset and compute overall accuracy.
+    Evaluate the model on a dataset and compute overall accuracy.
     
     This function sets the model to evaluation mode and processes the test data
     from the provided DataLoader. It computes predictions for each batch, counts the number
