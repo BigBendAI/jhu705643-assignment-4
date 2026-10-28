@@ -18,6 +18,29 @@ import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
 
+def model_forward(model, x_batch, device):
+    """
+    Run the model on one batch under bf16 autocast on the GPU and return float32 logits.
+
+    Under autocast the convolutions and matrix products run in bfloat16, which is about 1.5x
+    faster on an A100; bfloat16 keeps float32's exponent range, so no loss scaling is needed.
+    The caller works with the float32 copy of the logits. On the CPU autocast stays off. Used by
+    training and evaluation so both compute the same thing.
+
+    Args:
+        model (torch.nn.Module): The model.
+        x_batch (Tensor): A batch of clips.
+        device (torch.device): Device the batch is moved to.
+
+    Returns:
+        Tensor: float32 logits of shape (batch_size, n_classes).
+    """
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
+                        enabled=device.type == 'cuda'):
+        output = model(x_batch.to(device))
+    return output.float()
+
+
 def evaluate(model, dataloader, device):
     """
     Evaluate the model on a dataset and compute overall accuracy.
@@ -44,8 +67,7 @@ def evaluate(model, dataloader, device):
         len_dataset = len(dataloader.dataset)
         targets, outputs = [], []
         for x_batch, y_batch in tqdm(dataloader):
-            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-            output = model(x_batch)
+            output, y_batch = model_forward(model, x_batch, device), y_batch.to(device)
             pred = output.argmax(dim=1, keepdim=True)
             correct_preds = pred.eq(y_batch.view_as(pred)).sum().item()
             total_correct_preds += correct_preds

@@ -20,7 +20,7 @@ from tqdm import tqdm
 import torch
 import wandb
 
-from evaluate import evaluate
+from evaluate import evaluate, model_forward
 
 def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30,
           class_names=None):
@@ -206,8 +206,9 @@ def get_epoch_loss(model, criterion, dataloader, device, optimizer=None):
     len_dataset = len(dataloader.dataset)
 
     for x_batch, y_batch in tqdm(dataloader):
-        x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-        output = model(x_batch)
+        # Forward under bf16 autocast on the GPU (see evaluate.model_forward); the loss, the
+        # accuracy and the optimizer step use the float32 logits it returns.
+        output, y_batch = model_forward(model, x_batch, device), y_batch.to(device)
         batch_loss, n_batch_correct_preds = get_batch_loss(criterion, output, y_batch, optimizer)
 
         running_loss += batch_loss

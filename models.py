@@ -13,6 +13,7 @@ Classes:
           fully-connected layer to produce class logits.
 """
 
+import torch
 import torch.nn as nn
 from torchvision import models
 
@@ -88,7 +89,9 @@ class LRCN(nn.Module):
         
         # Replace the original fc layer with an identity mapping so that raw features are returned.
         base_cnn.fc = Identity()
-        self.base_model = base_cnn
+        # channels-last (NHWC) is the layout the GPU convolution kernels are fastest in; the weights
+        # are stored that way once, and forward() hands the frames over in the same layout.
+        self.base_model = base_cnn.to(memory_format=torch.channels_last)
 
         # Define the LSTM to process the sequence of frame features. batch_first=True makes it
         # read its input as (batch, time, features), which is what forward() builds. Without it
@@ -123,7 +126,8 @@ class LRCN(nn.Module):
         bs, ts = x.shape[:2]  # batch_size, time_steps
 
         # Run the CNN on all frames at once: (bs * ts, C, H, W) -> (bs * ts, features).
-        y = self.base_model(x.flatten(0, 1))
+        frames = x.flatten(0, 1).contiguous(memory_format=torch.channels_last)
+        y = self.base_model(frames)
 
         # One sequence of ts feature vectors per video: (bs, ts, features). One LSTM call.
         out, _ = self.rnn(y.view(bs, ts, -1))
