@@ -18,6 +18,11 @@ the following:
     - Creates a DataLoader for the test set.
     - Loads the trained model checkpoint.
     - Evaluates the model on the test set and prints overall test accuracy.
+
+- Predict mode:
+    - Like eval, but saves the softmax probabilities of the checkpoint on the validation and the
+      test set to an .npz file (averaged over two interleaved clips per video, as the paper
+      averages over clips), the input of the two-stream fusion in fuse.py.
     
 The module also includes a helper function for parsing command-line arguments.
 """
@@ -25,6 +30,7 @@ The module also includes a helper function for parsing command-line arguments.
 import os
 import argparse
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch import optim
@@ -36,7 +42,7 @@ from video_datasets import VideoDataset, split_overlap, read_split_csv
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
 from models import LRCN
 from train import train
-from evaluate import evaluate, get_test_report
+from evaluate import evaluate, predict, get_test_report
 
 def args_parser():
     """
@@ -70,6 +76,9 @@ def args_parser():
                         help='cross-validation fold: the split is read from <split_dir>/fold<N>.csv')
     parser.add_argument('--split_dir', default='splits', help='folder of the fold CSVs')
     parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
+    parser.add_argument('--modality', choices=['rgb', 'flow'], default='rgb',
+                        help='what the frame folders hold: RGB frames or optical-flow images '
+                             '(flow disables the horizontal flip and the colour jitter)')
     parser.add_argument('--num_workers', type=int, default=16,
                         help='DataLoader worker processes that decode the frames (0: main process)')
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
@@ -95,7 +104,11 @@ def args_parser():
     parser.add_argument('--bidirectional', action=argparse.BooleanOptionalAction, default=False,
                         help='bidirectional LSTM (forward and backward reads, concatenated)')
 
-    parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
+    parser.add_argument('-m', '--mode', type=str, default='train', required=True,
+                        choices=['train', 'eval', 'predict'],
+                        help="'train', 'eval' (test accuracy) or 'predict' (save probabilities)")
+    parser.add_argument('--predictions', default='predictions.npz',
+                        help='where --mode predict saves the val/test probabilities')
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
     parser.add_argument('-d', '--dropout', type=float, default=0.1, help='Dropout rate for regularization')
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
@@ -219,7 +232,8 @@ def main(args):
     # Load transformation statistics and create data augmentation transforms
     h, w, mean, std = transform_stats(model_type)
     tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std,
-                                                               strong=args.aug == 'strong')
+                                                               strong=args.aug == 'strong',
+                                                               modality=args.modality)
 
     # Initialize the model (LRCN)
     model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
@@ -279,8 +293,29 @@ def main(args):
             print(f"  {name:20s} recall {100 * report[name]['recall']:.1f}%  "
                   f"(n={int(report[name]['support'])})")
 
+    elif mode == 'predict':
+        # Softmax probabilities of the checkpoint on the val and test sets, averaged over the
+        # two interleaved 16-frame clips of each video, saved for the two-stream fusion
+        splits = load_split(args.fold, frame_dir, args.split_dir)
+        model.load_state_dict(torch.load(args.ckpt, map_location=device))
+        model.to(device)
+        saved = {'class_names': np.array(sorted(os.listdir(frame_dir))), 'ckpt': args.ckpt}
+        for name in ('val', 'test'):
+            probs = 0
+            for shifted in (False, True):
+                dataset = VideoDataset(splits[name], fr_per_vid, val_ts_transforms, shifted=shifted)
+                loader = test_dloaders(dataset, batch_size, model_type, args.num_workers)['test']
+                clip_probs, targets = predict(model, loader, device)
+                probs = probs + clip_probs / 2
+            saved[f'probs_{name}'], saved[f'targets_{name}'] = probs, targets
+            saved[f'clips_{name}'] = np.array([os.path.relpath(path, frame_dir)
+                                               for path, _ in splits[name]])
+            print(f'{name}: accuracy {100 * np.mean(probs.argmax(axis=1) == targets):.2f}%')
+        np.savez(args.predictions, **saved)
+        print(f'Probabilities saved to {args.predictions}')
+
     else:
-        raise ValueError('The mode argument must be either "train" or "eval".')
+        raise ValueError('The mode argument must be "train", "eval" or "predict".')
 
 if __name__ == "__main__":
     args = args_parser()

@@ -8,12 +8,15 @@ It includes functions to compute predictions and accuracy, generate a detailed c
 and compute a multilabel confusion matrix for all classes.
 
 Functions:
+    - predict: Returns the softmax probabilities and the labels for every clip of a DataLoader
+      (saved by run.py --mode predict for the two-stream fusion in fuse.py).
     - evaluate: Evaluates the model on a DataLoader and returns the ground truth labels,
       predicted labels, and overall accuracy.
     - get_test_report: Generates a classification report using scikit-learn's classification_report.
     - get_confusion_matrix: Computes a multilabel confusion matrix for each class.
 """
 
+import numpy as np
 import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
@@ -77,6 +80,30 @@ def evaluate(model, dataloader, device):
         accuracy = total_correct_preds / float(len_dataset)
     
     return targets, outputs, accuracy
+
+def predict(model, dataloader, device):
+    """
+    Softmax class probabilities of the model for every clip of a DataLoader.
+
+    Args:
+        model (torch.nn.Module): The trained video classification model.
+        dataloader (torch.utils.data.DataLoader): DataLoader over the clips (not shuffled).
+        device (torch.device): The device on which to run the model.
+
+    Returns:
+        tuple: (probs, targets)
+            - probs (ndarray): float32 array of shape (n_clips, n_classes), rows sum to 1.
+            - targets (ndarray): int64 array of the true labels, shape (n_clips,).
+    """
+    model.eval()
+    probs, targets = [], []
+    with torch.no_grad():
+        for x_batch, y_batch in tqdm(dataloader):
+            output = model_forward(model, x_batch, device)
+            probs.append(torch.softmax(output, dim=1).cpu().numpy())
+            targets.append(y_batch.numpy())
+    return np.concatenate(probs), np.concatenate(targets)
+
 
 def get_test_report(target, output, target_names):
     """

@@ -4,6 +4,7 @@ Module: utils.py
 This module provides helper functions for video processing and data transformations 
 for video classification tasks. It includes functions for:
     - Uniformly sampling frames from videos.
+    - Computing optical-flow images at the same positions (the input of the flow stream).
     - Storing extracted frames as JPEG images.
     - Retrieving image transformation statistics based on the model type.
     - Composing data transforms for training and validation/test datasets.
@@ -18,6 +19,12 @@ import torch
 from torchvision.transforms import v2
 from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
+
+# Dense optical flow (Farneback) settings and the scale that maps displacements to grey levels:
+# a displacement of 8 pixels fills the range, larger ones are clipped.
+FARNEBACK = {'pyr_scale': 0.5, 'levels': 3, 'winsize': 15, 'iterations': 3, 'poly_n': 5,
+             'poly_sigma': 1.2, 'flags': 0}
+FLOW_SCALE = 16.0
 
 
 def get_frames(vid, n_frames=1):
@@ -60,6 +67,68 @@ def get_frames(vid, n_frames=1):
     frame_idx = np.linspace(0, v_len - 1, n_frames).round().astype(int)
     frames = [cv2.cvtColor(decoded[idx], cv2.COLOR_BGR2RGB) for idx in frame_idx]
     return frames, v_len
+
+
+def flow_to_image(flow, scale=FLOW_SCALE):
+    """
+    Turn a dense flow field of shape (H, W, 2) into a 3-channel uint8 image.
+
+    As in the LRCN paper: channel 0 is the x displacement and channel 1 the y displacement, each
+    centred at 128 and multiplied by scale (clipped to 0..255); channel 2 is the flow magnitude
+    times scale. Zero motion maps to (128, 128, 0). Storing the flow as an image lets the same
+    JPEG folders, dataset code and ImageNet-pretrained backbone be used for the flow stream.
+
+    Args:
+        flow (ndarray): Flow field (H, W, 2) with x and y displacements in pixels.
+        scale (float): Grey levels per pixel of displacement.
+
+    Returns:
+        ndarray: uint8 image of shape (H, W, 3).
+    """
+    d_x, d_y = flow[..., 0], flow[..., 1]
+    magnitude = np.sqrt(d_x ** 2 + d_y ** 2)
+    image = np.stack([128.0 + d_x * scale, 128.0 + d_y * scale, magnitude * scale], axis=-1)
+    return np.clip(image, 0, 255).astype(np.uint8)
+
+
+def get_flow_frames(vid, n_frames=1):
+    """
+    Compute optical-flow images at n_frames evenly spaced positions of a video file.
+
+    The positions are the same as get_frames picks, so an RGB clip folder and its flow folder
+    line up frame by frame. The flow at position t is computed between frame t and frame t + 1
+    (for the last frame, between its predecessor and itself).
+
+    Args:
+        vid (str): Path to the video file.
+        n_frames (int): Number of flow images to compute.
+
+    Returns:
+        tuple: (flow images (list of HxWx3 uint8 arrays), v_len (decoded frame count)).
+            An unreadable video or one with fewer than two frames gives ([], 0).
+    """
+    v_cap = cv2.VideoCapture(vid)
+    if not v_cap.isOpened():
+        print("Failed to open video:", vid)
+        return [], 0
+    grey = []
+    while True:
+        success, frame = v_cap.read()
+        if not success:
+            break
+        grey.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    v_cap.release()
+    v_len = len(grey)
+    if v_len < 2:
+        print("Too few frames for optical flow in video:", vid)
+        return [], 0
+    frame_idx = np.linspace(0, v_len - 1, n_frames).round().astype(int)
+    flows = []
+    for idx in frame_idx:
+        first = min(idx, v_len - 2)
+        flow = cv2.calcOpticalFlowFarneback(grey[first], grey[first + 1], None, **FARNEBACK)
+        flows.append(flow_to_image(flow))
+    return flows, v_len
 
 
 def store_frames(frames, store_path):
@@ -118,7 +187,7 @@ def transform_stats(model='lrcn'):
     return h, w, mean, std
 
 
-def compose_data_transforms(height, width, mean, std, strong=False):
+def compose_data_transforms(height, width, mean, std, strong=False, modality='rgb'):
     """
     Compose and return data transforms for training and validation/test datasets.
 
@@ -137,29 +206,30 @@ def compose_data_transforms(height, width, mean, std, strong=False):
             of each side (resized back to height x width) and jitter brightness and contrast by
             up to 30%, all drawn once per clip. More variety per epoch means less memorising of
             the training clips. Default False gives the hand-over's flip and 10% translation.
+        modality (str): 'rgb' or 'flow'. A flow image stores the x displacement in a channel, so
+            mirroring it would reverse the motion direction without touching that channel, and
+            brightness/contrast jitter would rescale the motion: both are left out for flow.
 
     Returns:
         tuple: (train_transforms, val_test_transforms)
             - train_transforms: Composed transforms for the training set.
             - val_test_transforms: Composed transforms for the validation/test set.
     """
+    if modality not in ('rgb', 'flow'):
+        raise ValueError("modality must be 'rgb' or 'flow'")
     if strong:
-        train_transforms = v2.Compose([
-            v2.RandomResizedCrop((height, width), scale=(0.49, 1.0), ratio=(0.9, 1.1),
-                                 antialias=True),
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.ColorJitter(brightness=0.3, contrast=0.3),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean, std),
-        ])
+        train_steps = [v2.RandomResizedCrop((height, width), scale=(0.49, 1.0), ratio=(0.9, 1.1),
+                                            antialias=True)]
+        if modality == 'rgb':
+            train_steps += [v2.RandomHorizontalFlip(p=0.5),
+                            v2.ColorJitter(brightness=0.3, contrast=0.3)]
     else:
-        train_transforms = v2.Compose([
-            v2.Resize((height, width)),
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean, std),
-        ])
+        train_steps = [v2.Resize((height, width))]
+        if modality == 'rgb':
+            train_steps.append(v2.RandomHorizontalFlip(p=0.5))
+        train_steps.append(v2.RandomAffine(degrees=0, translate=(0.1, 0.1)))
+    train_transforms = v2.Compose(train_steps + [v2.ToDtype(torch.float32, scale=True),
+                                                 v2.Normalize(mean, std)])
     val_test_transforms = v2.Compose([
         v2.Resize((height, width)),
         v2.ToDtype(torch.float32, scale=True),

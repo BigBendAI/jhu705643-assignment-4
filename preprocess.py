@@ -9,8 +9,13 @@ The frame folders mirror the class folders of the dataset:
 
     <video_dir>/<Class>/<clip>.avi   ->   <frame_dir>/<Class>/<clip>/frame_000.jpg ... frame_031.jpg
 
+With ``--modality flow`` the script writes optical-flow images (see ``utils.get_flow_frames``) at
+the same positions instead of RGB frames, into a second root, for the flow stream of the
+two-stream model.
+
 Usage:
     python preprocess.py --video_dir data/UCF50 --frame_dir data/frames --n_frames 32 --workers 8
+    python preprocess.py --video_dir data/UCF50 --frame_dir data/flow --modality flow --workers 8
 """
 
 import argparse
@@ -19,7 +24,7 @@ from multiprocessing import Pool
 
 from tqdm import tqdm
 
-from utils import get_frames, store_frames
+from utils import get_frames, get_flow_frames, store_frames
 
 
 def list_videos(video_dir):
@@ -48,13 +53,14 @@ def extract_one(job):
     Extract and store the frames of one video (worker function for the process pool).
 
     Args:
-        job (tuple): (video_path, clip_dir, n_frames).
+        job (tuple): (video_path, clip_dir, n_frames, modality).
 
     Returns:
         tuple: (video_path, number of frames stored).
     """
-    video_path, clip_dir, n_frames = job
-    frames, _ = get_frames(video_path, n_frames)
+    video_path, clip_dir, n_frames, modality = job
+    read_frames = get_flow_frames if modality == 'flow' else get_frames
+    frames, _ = read_frames(video_path, n_frames)
     store_frames(frames, clip_dir)
     return video_path, len(frames)
 
@@ -67,6 +73,8 @@ def main():
     parser.add_argument('--n_frames', type=int, default=32,
                         help='Frames to keep per video (the model uses 16 of them per clip)')
     parser.add_argument('--workers', type=int, default=8, help='Parallel worker processes')
+    parser.add_argument('--modality', choices=['rgb', 'flow'], default='rgb',
+                        help='write RGB frames or optical-flow images at the same positions')
     args = parser.parse_args()
 
     videos = list_videos(args.video_dir)
@@ -76,7 +84,7 @@ def main():
         clip_dir = os.path.join(args.frame_dir, class_name, clip_name)
         if os.path.isdir(clip_dir) and len(os.listdir(clip_dir)) == args.n_frames:
             continue  # already extracted
-        jobs.append((video_path, clip_dir, args.n_frames))
+        jobs.append((video_path, clip_dir, args.n_frames, args.modality))
     print(f'{len(videos)} videos found, {len(jobs)} to extract')
 
     short = []

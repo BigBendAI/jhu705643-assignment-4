@@ -40,12 +40,17 @@ class VideoDataset(Dataset):
             stored frames are cut into fr_per_vid equal segments and one frame is drawn at random
             from each segment every time the clip is loaded, so each epoch trains on a different
             clip of the same video (training). Default is False.
+        shifted (bool, optional): With random_clip False, take the evenly spaced positions half a
+            step later: the second of two interleaved clips of a video, used by predict mode to
+            average the predictions over two clips as the paper does. Default is False.
     """
-    def __init__(self, vid_dataset, fr_per_vid, transforms=None, random_clip=False):
+    def __init__(self, vid_dataset, fr_per_vid, transforms=None, random_clip=False,
+                 shifted=False):
         self.dataset = vid_dataset
         self.fpv = fr_per_vid
         self.transforms = transforms
         self.random_clip = random_clip
+        self.shifted = shifted
 
     def frame_indices(self, n_stored):
         """
@@ -57,9 +62,13 @@ class VideoDataset(Dataset):
         Returns:
             ndarray: fr_per_vid indices in increasing order.
         """
-        if not self.random_clip or n_stored <= self.fpv:
+        if n_stored <= self.fpv or not (self.random_clip or self.shifted):
             # Evenly spaced; repeats when fewer frames are stored, so every clip has the length.
             return np.linspace(0, n_stored - 1, self.fpv).round().astype(int)
+        if not self.random_clip:
+            # The same spacing, started half a step later (never past the last frame).
+            positions = np.linspace(0, n_stored - 1, self.fpv) + (n_stored - 1) / (2 * self.fpv)
+            return np.minimum(positions.round().astype(int), n_stored - 1)
         # One random frame per segment. torch's random generator is seeded per DataLoader
         # worker, so the workers do not all draw the same frames.
         edges = np.linspace(0, n_stored, self.fpv + 1).astype(int)

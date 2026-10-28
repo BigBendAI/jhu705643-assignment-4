@@ -89,3 +89,16 @@ def test_collate_stacks_clips(frames):
     clips, labels = collate_fn_rnn([dataset[0], dataset[1]])
     assert clips.shape == (2, 16, 3, 6, 8)
     assert labels.tolist() == [0, 1]
+
+
+def test_shifted_clip_is_interleaved(frames):
+    """With 32 stored frames, the shifted clip takes the second frame of each pair."""
+    clip_list = [(str(frames / 'A' / 'v_A_g01_c01'), 0)]
+    first = red_levels(VideoDataset(clip_list, 16)[0][0])
+    second = red_levels(VideoDataset(clip_list, 16, shifted=True)[0][0])
+    assert first == [round(i * 31 / 15) for i in range(16)]
+    assert all(b >= a for a, b in zip(first, second)) and second[-1] == 31
+    assert sum(b > a for a, b in zip(first, second)) == 15   # only the last frame coincides
+    # with no spare frames the shifted clip equals the plain one
+    short = [(str(frames / 'A' / 'v_A_g01_c02'), 0)]
+    assert red_levels(VideoDataset(short, 16, shifted=True)[0][0]) == red_levels(VideoDataset(short, 16)[0][0])
