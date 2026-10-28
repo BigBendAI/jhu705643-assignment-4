@@ -90,8 +90,10 @@ class LRCN(nn.Module):
         base_cnn.fc = Identity()
         self.base_model = base_cnn
 
-        # Define the LSTM to process the sequence of frame features.
-        self.rnn = nn.LSTM(num_features, hidden_size, n_layers)
+        # Define the LSTM to process the sequence of frame features. batch_first=True makes it
+        # read its input as (batch, time, features), which is what forward() builds. Without it
+        # the LSTM expects (time, batch, features) and reads the batch axis as time.
+        self.rnn = nn.LSTM(num_features, hidden_size, n_layers, batch_first=True)
         
         # Define dropout for regularization.
         self.dropout = nn.Dropout(dropout_rate)
@@ -106,9 +108,11 @@ class LRCN(nn.Module):
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
         
-        For each time step (frame), the CNN backbone extracts features. These features are then
-        passed through the LSTM sequentially. The output from the last time step is then passed
-        through dropout and the final fully-connected layer to produce the class logits.
+        The CNN backbone extracts a feature vector from every frame of every video in one call.
+        The features are reshaped to (batch_size, time_steps, features) and the LSTM reads each
+        video's frames as one sequence. The output at the last time step is passed through
+        dropout and the final fully-connected layer to produce the class logits. Each video's
+        logits depend only on its own frames.
 
         Args:
             x (Tensor): Input tensor of shape (batch_size, time_steps, channels, height, width).
@@ -116,18 +120,14 @@ class LRCN(nn.Module):
         Returns:
             Tensor: Output logits for each sample in the batch with shape (batch_size, n_classes).
         """
-        bs, ts, c, h, w = x.shape  # batch_size, time_steps, channels, height, width
-        
-        # Process the first frame separately to initialize the LSTM hidden and cell states.
-        idx = 0
-        y = self.base_model(x[:, idx])
-        _, (hn, cn) = self.rnn(y.unsqueeze(1))
-        
-        # Iterate over the remaining frames, feeding each frame's features into the LSTM.
-        for idx in range(1, ts):
-            y = self.base_model(x[:, idx])
-            out, (hn, cn) = self.rnn(y.unsqueeze(1), (hn, cn))
-        
+        bs, ts = x.shape[:2]  # batch_size, time_steps
+
+        # Run the CNN on all frames at once: (bs * ts, C, H, W) -> (bs * ts, features).
+        y = self.base_model(x.flatten(0, 1))
+
+        # One sequence of ts feature vectors per video: (bs, ts, features). One LSTM call.
+        out, _ = self.rnn(y.view(bs, ts, -1))
+
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
         
