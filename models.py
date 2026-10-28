@@ -7,16 +7,16 @@ extraction from individual frames with an LSTM to capture temporal dynamics acro
 An additional fully-connected layer is used to output the final class predictions.
 
 Classes:
-    Identity: A helper module that returns the input unchanged. It is used to replace the fully-connected
-              layer of the ResNet backbone.
-    LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization, and a final
-          fully-connected layer to produce class logits.
+    Identity: A helper module that returns the input unchanged. It is used to replace the
+              fully-connected layer of the ResNet backbone.
+    LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization, and a
+          final fully-connected layer to produce class logits.
     VideoCNN: The 3D CNN the hand-over's '3dcnn' model type was written for (R3D-18 pretrained on
           Kinetics-400), used as a third stream next to the RGB and flow LRCNs.
 """
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torchvision import models
 from torchvision.models import video
 
@@ -40,24 +40,24 @@ VIDEO_BACKBONES = {
 class Identity(nn.Module):
     """
     A placeholder identity operator that is argument-insensitive.
-    
+
     This module is used to replace the fully-connected (fc) layer in the ResNet backbone,
     effectively making the backbone output the raw features before classification.
-    
+
     Example:
         >>> identity = Identity()
         >>> output = identity(input_tensor)
     """
     def __init__(self):
-        super(Identity, self).__init__()
+        super().__init__()
 
     def forward(self, x):
         """
         Forward pass that returns the input as is.
-        
+
         Args:
             x (Tensor): Input tensor.
-        
+
         Returns:
             Tensor: The same tensor x.
         """
@@ -66,9 +66,10 @@ class Identity(nn.Module):
 class LRCN(nn.Module):
     """
     LRCN (Long-term Recurrent Convolutional Network) for video classification.
-    
+
     This model uses a ResNet backbone as a 2D CNN to extract spatial features from each video frame.
-    An LSTM network is then used to model the temporal dynamics across the sequence of frame features.
+    An LSTM network is then used to model the temporal dynamics across the sequence of frame
+    features.
     Dropout is applied before the final fully-connected layer that produces class logits.
 
     Args:
@@ -76,10 +77,11 @@ class LRCN(nn.Module):
         n_layers (int): Number of recurrent layers in the LSTM.
         dropout_rate (float): Dropout rate applied before the final classification layer.
         n_classes (int): Number of output classes.
-        pretrained (bool, optional): If True, uses a ResNet model pretrained on ImageNet. Default is True.
+        pretrained (bool, optional): If True, uses a ResNet model pretrained on ImageNet.
+            Default is True.
         cnn_model (str, optional): Specifies the ResNet variant to use as the backbone.
-                                   Options: 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'.
-                                   Default is 'resnet34'.
+            Options: 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'. Default is
+            'resnet34'.
         temporal_pooling (str, optional): 'last' classifies the LSTM output of the last frame
             (the hand-over); 'late_fusion' classifies every frame's output and averages the
             logits over time, as the LRCN paper does. Default is 'last'.
@@ -101,7 +103,7 @@ class LRCN(nn.Module):
     def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True,
                  cnn_model='resnet34', temporal_pooling='last', freeze_bn=False, freeze_stages=0,
                  feature_dropout=0.0, bidirectional=False):
-        super(LRCN, self).__init__()
+        super().__init__()
         if temporal_pooling not in ('last', 'late_fusion'):
             raise ValueError("temporal_pooling must be 'last' or 'late_fusion'")
         self.temporal_pooling = temporal_pooling
@@ -110,13 +112,14 @@ class LRCN(nn.Module):
         # Set up the ResNet backbone as a 2D CNN feature extractor. (The original built a resnet34
         # when 'resnet152' was requested.)
         if cnn_model not in BACKBONES:
-            raise ValueError('The input CNN backbone is not supported, please choose a valid ResNet variant.')
+            raise ValueError('The input CNN backbone is not supported, please choose a valid '
+                             'ResNet variant.')
         constructor, weights = BACKBONES[cnn_model]
         base_cnn = constructor(weights=weights if pretrained else None)
 
         # Retrieve the number of features output by the CNN's original fully-connected layer.
         num_features = base_cnn.fc.in_features
-        
+
         # Replace the original fc layer with an identity mapping so that raw features are returned.
         base_cnn.fc = Identity()
         # channels-last (NHWC) is the layout the GPU convolution kernels are fastest in; the weights
@@ -132,10 +135,10 @@ class LRCN(nn.Module):
         self.rnn = nn.LSTM(num_features, hidden_size, n_layers, batch_first=True,
                            dropout=dropout_rate if n_layers > 1 else 0.0,
                            bidirectional=bidirectional)
-        
+
         # Define dropout for regularization.
         self.dropout = nn.Dropout(dropout_rate)
-        
+
         # Final fully-connected layer to produce logits for each class (a bidirectional LSTM
         # outputs the forward and backward hidden states side by side).
         self.fc = nn.Linear(hidden_size * (2 if bidirectional else 1), n_classes)
@@ -200,10 +203,10 @@ class LRCN(nn.Module):
     def forward(self, x):
         """
         Forward pass for the LRCN model.
-        
+
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
-        
+
         The CNN backbone extracts a feature vector from every frame of every video in one call.
         The features are reshaped to (batch_size, time_steps, features) and the LSTM reads each
         video's frames as one sequence. With temporal_pooling 'last' the output at the last time
@@ -232,7 +235,7 @@ class LRCN(nn.Module):
 
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
-        
+
         # Pass the final output through the fully-connected layer to get class logits.
         out = self.fc(out)
         return out

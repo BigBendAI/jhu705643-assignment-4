@@ -25,18 +25,32 @@ def load(path):
         return json.load(json_file)
 
 
+def read_folds(out_dir):
+    """
+    Read every fold's fusion.json (and fusion3.json when present) below out_dir.
+
+    Args:
+        out_dir (str): Folder with fold<k>/ sub-folders.
+
+    Returns:
+        list: (fold name, two-stream report, three-stream report or None) per fold.
+    """
+    rows = []
+    for path in sorted(glob.glob(os.path.join(out_dir, 'fold*', 'fusion.json'))):
+        fold = os.path.basename(os.path.dirname(path))
+        rows.append((fold, load(path), load(os.path.join(os.path.dirname(path), 'fusion3.json'))))
+    if not rows:
+        raise FileNotFoundError(f'no fold*/fusion.json below {out_dir}')
+    return rows
+
+
 def main():
     """Read every fold's fusion files below --out_dir and print the table and the means."""
     parser = argparse.ArgumentParser(description='Cross-validation summary')
     parser.add_argument('--out_dir', default='cv', help='folder with fold<k>/fusion.json files')
     args = parser.parse_args()
 
-    rows = []
-    for path in sorted(glob.glob(os.path.join(args.out_dir, 'fold*', 'fusion.json'))):
-        fold = os.path.basename(os.path.dirname(path))
-        rows.append((fold, load(path), load(os.path.join(os.path.dirname(path), 'fusion3.json'))))
-    if not rows:
-        raise FileNotFoundError(f'no fold*/fusion.json below {args.out_dir}')
+    rows = read_folds(args.out_dir)
     with_3d = all(three is not None for _, _, three in rows)
 
     columns = [('rgb', lambda two, three: two['members']['rgb']),
@@ -45,19 +59,21 @@ def main():
     if with_3d:
         columns += [('3dcnn', lambda two, three: three['members']['3dcnn']),
                     ('rgb+flow+3dcnn', lambda two, three: three['fused'])]
-    header = ''.join(f"{name + ' val':>16s}{name + ' test':>17s}" for name, _ in columns)
-    print(f"{'fold':6s}" + header)
+    width = 22
+    print(f"{'fold':6s}" + ''.join(f"{name + ' val':>{width}s}{name + ' test':>{width}s}"
+                                    for name, _ in columns))
     for fold, two, three in rows:
         line = f'{fold:6s}'
         for _, pick in columns:
             acc = pick(two, three)
-            line += f"{100 * acc['val']:16.2f}{100 * acc['test']:17.2f}"
+            line += f"{100 * acc['val']:{width}.2f}{100 * acc['test']:{width}.2f}"
         print(line)
     for stat, func in (('mean', np.mean), ('std', np.std)):
         line = f'{stat:6s}'
         for _, pick in columns:
             for split in ('val', 'test'):
-                line += f"{func([100 * pick(two, three)[split] for _, two, three in rows]):16.2f}"
+                values = [100 * pick(two, three)[split] for _, two, three in rows]
+                line += f'{func(values):{width}.2f}'
         print(line)
     test = [100 * two['fused']['test'] for _, two, _ in rows]
     print(f'\nTwo-stream LRCN (rgb + flow), {len(rows)}-fold group cross-validation: '

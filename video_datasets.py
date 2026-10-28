@@ -9,25 +9,25 @@ by person group into cross-validation folds and save/load a split as a CSV, and 
 functions that turn a list of clips into a batch.
 """
 
-import torch
-from torch.utils.data import Dataset
-from torchvision.io import decode_image, ImageReadMode
-
 import os
 import re
 import csv
 import glob
-from tqdm import tqdm
+
 import numpy as np
+import torch
+from torch.utils.data import Dataset
+from torchvision.io import decode_image, ImageReadMode
+from tqdm import tqdm
 
 
 class VideoDataset(Dataset):
     """
     PyTorch Dataset class for loading video data from directories of frame images.
-    
+
     Each video is represented as a directory containing JPEG images of its frames.
     The dataset is provided as a dictionary mapping each video directory path to its label.
-    
+
     Args:
         vid_dataset (list): List of (video directory path, integer label) pairs.
         fr_per_vid (int): Number of frames per video to load, in time order.
@@ -111,14 +111,14 @@ class VideoDataset(Dataset):
 def load_dataset(frame_dir):
     """
     Load the full video dataset from the specified directory.
-    
+
     Each subdirectory in frame_dir is assumed to correspond to a video category.
     The function builds a dictionary where keys are paths to video directories and
     values are integer labels corresponding to each category.
-    
+
     Args:
         frame_dir (str): Path to the directory containing subdirectories for each video category.
-    
+
     Returns:
         tuple: (vid_dataset, label_dict)
             - vid_dataset (dict): Dictionary mapping video directory paths to integer labels.
@@ -260,15 +260,15 @@ def read_split_csv(csv_path, frame_dir):
 def collate_fn_r3d_18(batch):
     """
     Collate function for 3D CNN models (e.g., R3D-18).
-    
+
     Assumes each sample in the batch is a tuple (video_frames, label),
     where video_frames is a tensor of shape (T, C, H, W). This function filters out any samples
     with no frames, stacks the video frame tensors, transposes the tensor dimensions as needed,
     and stacks the labels.
-    
+
     Args:
         batch (list): List of samples, each as (video_frames, label).
-    
+
     Returns:
         tuple: (imgs_tensor, labels_tensor)
             - imgs_tensor (Tensor): Stacked video frames tensor with shape adjusted for R3D-18.

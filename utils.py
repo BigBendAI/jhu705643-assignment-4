@@ -1,7 +1,7 @@
 """
 Module: utils.py
 
-This module provides helper functions for video processing and data transformations 
+This module provides helper functions for video processing and data transformations
 for video classification tasks. It includes functions for:
     - Uniformly sampling frames from videos.
     - Computing optical-flow images at the same positions (the input of the flow stream).
@@ -191,8 +191,9 @@ def compose_data_transforms(height, width, mean, std, strong=False, modality='rg
     """
     Compose and return data transforms for training and validation/test datasets.
 
-    The training transforms include data augmentation such as random horizontal flipping and random affine transformations,
-    while the validation/test transforms consist solely of resizing, converting to tensor, and normalizing.
+    The training transforms include data augmentation such as random horizontal flipping and
+    random affine transformations, while the validation/test transforms consist solely of
+    resizing, converting to tensor, and normalizing.
     These are torchvision.transforms.v2 transforms applied by VideoDataset to a whole clip (a uint8
     tensor of shape (T, C, H, W)) in one call, so a clip is flipped or shifted as a whole; the
     hand-over's per-frame transforms flipped and shifted each frame on its own.
@@ -306,4 +307,3 @@ def test_dloaders(test_dataset, batch_size, model='lrcn', num_workers=0):
     test_dl = make_dloader(test_dataset, 2 * batch_size, False, collate_fn, num_workers)
     dataloaders = {'test': test_dl}
     return dataloaders
-

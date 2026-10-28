@@ -101,4 +101,5 @@ def test_shifted_clip_is_interleaved(frames):
     assert sum(b > a for a, b in zip(first, second)) == 15   # only the last frame coincides
     # with no spare frames the shifted clip equals the plain one
     short = [(str(frames / 'A' / 'v_A_g01_c02'), 0)]
-    assert red_levels(VideoDataset(short, 16, shifted=True)[0][0]) == red_levels(VideoDataset(short, 16)[0][0])
+    assert (red_levels(VideoDataset(short, 16, shifted=True)[0][0])
+            == red_levels(VideoDataset(short, 16)[0][0]))

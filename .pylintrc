@@ -1,0 +1,22 @@
+# Pylint configuration. Only conventions and size limits are adjusted; no message category is
+# disabled.
+[MAIN]
+ignore-paths=^venv/.*$,^wandb/.*$,^data/.*$
+
+[FORMAT]
+max-line-length=100
+
+[BASIC]
+# Short names that are standard in numerical / PyTorch code.
+good-names=i,j,k,n,x,y,h,w,c,t,bs,ts,fc,lr,_
+
+[TYPECHECK]
+# OpenCV builds its Python namespace at import time, so pylint cannot see members such as
+# cv2.VideoCapture; declare them as generated instead of silencing the no-member check.
+generated-members=cv2.*
+
+[DESIGN]
+# The LRCN constructor takes one keyword per model option and train() takes the loop's parts.
+max-args=12
+max-positional-arguments=12
+max-locals=20
