@@ -5,7 +5,8 @@ This module provides classes and functions for loading and processing video data
 splitting them into training, validation, and test sets, and preparing data for video
 classification models. It includes a custom PyTorch Dataset for videos stored as directories
 of frame images, functions to load the dataset from a directory structure, split the dataset
-using stratified sampling, and custom collate functions for handling variable-length video sequences.
+by person group into cross-validation folds and save/load a split as a CSV, and custom collate
+functions for handling variable-length video sequences.
 """
 
 import torch
@@ -16,10 +17,11 @@ from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 
 import os
+import re
+import csv
 import glob
 from tqdm import tqdm
 import numpy as np
-from sklearn.model_selection import StratifiedShuffleSplit
 
 
 class VideoDataset(Dataset):
@@ -102,47 +104,126 @@ def load_dataset(frame_dir):
     return vid_dataset, label_dict
 
 
-def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
+def clip_group(vid_path):
     """
-    Split the dataset into training, validation, and test sets using stratified sampling.
-    
-    This function uses StratifiedShuffleSplit to ensure that each split has a representative
-    distribution of classes.
-    
+    Return the (class name, group number) of a clip from its folder name.
+
+    UCF50 clip folders are named like v_Basketball_g07_c03: g07 is the group. The clips of one
+    group are cut from the same long video, so they show the same person, background and
+    viewpoint. If one clip of a group is in the training set, the other clips of that group are
+    almost memorised, so a group must never be shared between train, validation and test.
+
+    Args:
+        vid_path (str): Path to the clip's frame directory.
+
+    Returns:
+        tuple: (class name, group number).
+    """
+    match = re.match(r'v_(.+)_g(\d+)_c\d+$', os.path.basename(vid_path))
+    if match is None:
+        raise ValueError(f'Cannot read the group from clip folder name {vid_path!r}')
+    return match.group(1), int(match.group(2))
+
+
+def dataset_split(vid_dataset, fold, n_folds=5, n_val_groups=2, seed=0):
+    """
+    Split the dataset into training, validation and test sets by group, for one fold.
+
+    Within each class the groups (see clip_group) are shuffled once with the seed and dealt
+    round-robin into n_folds folds. The groups of the requested fold form the test set, the
+    next n_val_groups of the remaining groups form the validation set and all other groups form
+    the training set. Every clip of a group lands in the same set, every class is in every set,
+    and running every fold in turn tests the model on every group once (cross-validation).
+
     Args:
         vid_dataset (dict): Dictionary mapping video paths to labels.
-        tr_ratio (float): Proportion of the data to use for training.
-        ts_ratio (float): Proportion of the data to use for testing.
-        seed (int, optional): Random seed for reproducibility. Default is 0.
-    
+        fold (int): Which fold is the test set (0 .. n_folds - 1).
+        n_folds (int, optional): Number of folds. Default is 5 (about 5 test groups per class).
+        n_val_groups (int, optional): Validation groups per class. Default is 2.
+        seed (int, optional): Random seed for the shuffle. Default is 0.
+
     Returns:
-        tuple: (tr_dataset, val_dataset, ts_dataset)
-            - tr_dataset (list): List of (video_path, label) tuples for the training set.
-            - val_dataset (list): List of (video_path, label) tuples for the validation set.
-            - ts_dataset (list): List of (video_path, label) tuples for the test set.
+        tuple: (tr_dataset, val_dataset, ts_dataset), each a list of (video_path, label) tuples.
     """
-    vid_paths = np.array([vid_path for vid_path in vid_dataset.keys()])
-    vid_labels = np.array([vid_label for vid_label in vid_dataset.values()])
-    print('Splitting train/validation/test datasets....')
+    if not 0 <= fold < n_folds:
+        raise ValueError(f'fold must be between 0 and {n_folds - 1}')
+    print(f'Splitting train/validation/test datasets by group (fold {fold} of {n_folds})....')
+    clips_by_group = {}
+    for clip in vid_dataset.items():          # clip = (video path, label)
+        clips_by_group.setdefault(clip_group(clip[0]), []).append(clip)
 
-    # Test split using StratifiedShuffleSplit
-    ts_spliter = StratifiedShuffleSplit(n_splits=1, test_size=ts_ratio, random_state=seed)
-    for tr_val_idx, ts_idx in ts_spliter.split(vid_paths, vid_labels):
-        ts_paths, ts_labels = vid_paths[ts_idx], vid_labels[ts_idx]
-        tr_val_paths, tr_val_labels = vid_paths[tr_val_idx], vid_labels[tr_val_idx]
-    ts_dataset = [(ts_path, ts_label) for ts_path, ts_label in zip(ts_paths, ts_labels)]
+    rng = np.random.default_rng(seed)
+    splits = {'train': [], 'val': [], 'test': []}
+    for class_name in sorted({name for name, _ in clips_by_group}):
+        groups = sorted(group for name, group in clips_by_group if name == class_name)
+        groups = [groups[i] for i in rng.permutation(len(groups))]
+        test_groups = groups[fold::n_folds]
+        rest = [group for group in groups if group not in test_groups]
+        for group in groups:
+            if group in test_groups:
+                target = 'test'
+            elif group in rest[:n_val_groups]:
+                target = 'val'
+            else:
+                target = 'train'
+            splits[target].extend(sorted(clips_by_group[(class_name, group)]))
+    return splits['train'], splits['val'], splits['test']
 
-    # Train/validation split
-    val_ratio = 1 - tr_ratio - ts_ratio
-    val_wt = val_ratio / (tr_ratio + val_ratio)
-    val_spliter = StratifiedShuffleSplit(n_splits=1, test_size=val_wt, random_state=seed)
-    for tr_idx, val_idx in val_spliter.split(tr_val_paths, tr_val_labels):
-        tr_paths, tr_labels = tr_val_paths[tr_idx], tr_val_labels[tr_idx]
-        val_paths, val_labels = tr_val_paths[val_idx], tr_val_labels[val_idx]
-    tr_dataset = [(tr_path, tr_label) for tr_path, tr_label in zip(tr_paths, tr_labels)]
-    val_dataset = [(val_path, val_label) for val_path, val_label in zip(val_paths, val_labels)]
 
-    return tr_dataset, val_dataset, ts_dataset
+def split_overlap(splits):
+    """
+    Return the (class, group) pairs that appear in more than one of the splits.
+
+    Args:
+        splits (dict): Dictionary with keys 'train', 'val' and 'test', each a list of
+            (video_path, label) tuples.
+
+    Returns:
+        set: The shared (class name, group number) pairs; empty when the split is leak-free.
+    """
+    groups = {name: {clip_group(vid_path) for vid_path, _ in clips}
+              for name, clips in splits.items()}
+    return ((groups['train'] & groups['val']) | (groups['train'] & groups['test'])
+            | (groups['val'] & groups['test']))
+
+
+def write_split_csv(csv_path, splits, frame_dir):
+    """
+    Save a split as a CSV with the columns split, clip_dir, label.
+
+    clip_dir is stored relative to frame_dir, so the CSV can be committed and used on another
+    machine where the frames live in a different directory.
+
+    Args:
+        csv_path (str): Where to write the CSV.
+        splits (dict): Dictionary with keys 'train', 'val' and 'test' (lists of (path, label)).
+        frame_dir (str): The frame directory the paths are relative to.
+    """
+    with open(csv_path, 'w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(['split', 'clip_dir', 'label'])
+        for name in ('train', 'val', 'test'):
+            for vid_path, vid_label in splits[name]:
+                writer.writerow([name, os.path.relpath(vid_path, frame_dir), int(vid_label)])
+
+
+def read_split_csv(csv_path, frame_dir):
+    """
+    Load a split written by write_split_csv, turning clip_dir back into a full path.
+
+    Args:
+        csv_path (str): The CSV to read.
+        frame_dir (str): The frame directory to join clip_dir onto.
+
+    Returns:
+        dict: Dictionary with keys 'train', 'val' and 'test', each a list of (path, label).
+    """
+    splits = {'train': [], 'val': [], 'test': []}
+    with open(csv_path, newline='', encoding='utf-8') as csv_file:
+        for row in csv.DictReader(csv_file):
+            vid_path = os.path.join(frame_dir, row['clip_dir'])
+            splits[row['split']].append((vid_path, int(row['label'])))
+    return splits
 
 
 def collate_fn_r3d_18(batch):

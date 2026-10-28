@@ -30,10 +30,9 @@ import torch.nn as nn
 from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
-import numpy as np
 import wandb
 
-from video_datasets import VideoDataset, load_dataset, dataset_split
+from video_datasets import VideoDataset, split_overlap, read_split_csv
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
 from models import LRCN
 from train import train
@@ -48,8 +47,8 @@ def args_parser():
         
     Arguments include:
         -fd/--frame_dir: Directory for storing video frames.
-        -trs/--train_size: Proportion of data to use for training (default 0.7).
-        -tss/--test_size: Proportion of data to use for testing (default 0.1).
+        --fold: Which cross-validation fold to use (default 0); the split is read from
+            splits/fold<N>.csv written by make_splits.py.
         -fpv/--fr_per_vid: Number of frames per video to consider (default 16).
         -nc/--n_classes: Number of classes for the classification task (required).
         -c/--ckpt: Path for loading a trained model checkpoint.
@@ -67,8 +66,9 @@ def args_parser():
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
     parser.add_argument('-fd', '--frame_dir', help='Directory for storing video frames')
-    parser.add_argument('-trs', '--train_size', type=float, default=0.7, help='Train set size')
-    parser.add_argument('-tss', '--test_size', type=float, default=0.1, help='Test set size')
+    parser.add_argument('--fold', type=int, default=0,
+                        help='cross-validation fold: the split is read from <split_dir>/fold<N>.csv')
+    parser.add_argument('--split_dir', default='splits', help='folder of the fold CSVs')
     parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
 
@@ -96,6 +96,30 @@ def args_parser():
     args = parser.parse_args()
     return args
 
+def load_split(fold, frame_dir, split_dir='splits'):
+    """
+    Read the split CSV of a fold, check that no group is in two sets, and print the sizes.
+
+    Args:
+        fold (int): The fold number; the file is <split_dir>/fold<fold>.csv.
+        frame_dir (str): The frame directory the CSV's clip paths are relative to.
+        split_dir (str): The folder of the fold CSVs. Default is 'splits'.
+
+    Returns:
+        dict: Dictionary with keys 'train', 'val' and 'test' (lists of (path, label)).
+    """
+    csv_path = os.path.join(split_dir, f'fold{fold}.csv')
+    if not os.path.isfile(csv_path):
+        raise FileNotFoundError(f'{csv_path} not found: run make_splits.py first')
+    splits = read_split_csv(csv_path, frame_dir)
+    shared = split_overlap(splits)
+    if shared:
+        raise RuntimeError(f'{len(shared)} groups appear in more than one split, '
+                           f'e.g. {sorted(shared)[:3]}')
+    print(f'Loaded {csv_path}: ' + ', '.join(f'{name} {len(clips)}' for name, clips in splits.items()))
+    return splits
+
+
 def main(args):
     """
     Main function to execute training or evaluation based on the parsed command-line arguments.
@@ -120,8 +144,6 @@ def main(args):
     """
     # Dataset parameters
     frame_dir = args.frame_dir
-    tr_size = args.train_size
-    ts_size = args.test_size
     fr_per_vid = args.fr_per_vid
     n_classes = args.n_classes
 
@@ -150,15 +172,9 @@ def main(args):
                  n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
 
     if mode == 'train':
-        # Load dataset and split into train/validation/test
-        vid_dataset, label_dict = load_dataset(frame_dir)
-        tr_split, val_split, ts_split = dataset_split(vid_dataset, tr_size, ts_size)
-
-        # Save the splits for reproducibility and later use in evaluation
-        splits = {'train': np.array(tr_split),
-                  'val': np.array(val_split),
-                  'test': np.array(ts_split)}
-        np.save('./splits.npy', splits)
+        # Load this fold's split (written once by make_splits.py and committed)
+        splits = load_split(args.fold, frame_dir, args.split_dir)
+        tr_split, val_split, ts_split = splits['train'], splits['val'], splits['test']
 
         # Create PyTorch Datasets and DataLoaders for train, validation and test. The test loader is
         # only used to log test loss/accuracy per epoch; model selection uses validation.
@@ -182,10 +198,8 @@ def main(args):
         wandb.finish()
 
     elif mode == 'eval':
-        # Load saved dataset splits
-        splits = np.load('./splits.npy', allow_pickle=True)
-        ts_split = splits.item()['test']
-        ts_split = [(sample[0], int(sample[1])) for sample in ts_split]
+        # Load this fold's split and evaluate on its test set
+        ts_split = load_split(args.fold, frame_dir, args.split_dir)['test']
 
         # Create PyTorch Dataset and DataLoader for the test set
         ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
