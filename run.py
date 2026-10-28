@@ -40,7 +40,7 @@ import wandb
 
 from video_datasets import VideoDataset, split_overlap, read_split_csv
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
-from models import LRCN
+from models import LRCN, VideoCNN
 from train import train
 from evaluate import evaluate, predict, get_test_report
 
@@ -84,8 +84,11 @@ def args_parser():
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
 
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
-    parser.add_argument('-mt', '--model_type', help='3D CNN or LRCN', default='lrcn')
-    parser.add_argument('-cnn', '--cnn_backbone', default='resnet34', help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
+    parser.add_argument('-mt', '--model_type', choices=['lrcn', '3dcnn'], default='lrcn',
+                        help="'lrcn' (ResNet + LSTM, 224x224) or '3dcnn' (R3D-18, 112x112)")
+    parser.add_argument('-cnn', '--cnn_backbone', default='resnet34',
+                        help='LRCN: resnet18, resnet34, resnet50, resnet101, resnet152; '
+                             '3dcnn: r3d_18, r2plus1d_18')
     # A plain default=True argument receives the *string* 'False' from the command line, which is
     # truthy; BooleanOptionalAction gives real --pretrained / --no-pretrained flags.
     parser.add_argument('-p', '--pretrained', action=argparse.BooleanOptionalAction, default=True,
@@ -235,12 +238,17 @@ def main(args):
                                                                strong=args.aug == 'strong',
                                                                modality=args.modality)
 
-    # Initialize the model (LRCN)
-    model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
-                 n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone,
-                 temporal_pooling=args.temporal_pooling, freeze_bn=args.freeze_bn,
-                 freeze_stages=args.freeze_stages, feature_dropout=args.feature_dropout,
-                 bidirectional=args.bidirectional)
+    # Initialize the model: the LRCN, or the 3D CNN of the hand-over's '3dcnn' model type
+    if model_type == '3dcnn':
+        model = VideoCNN(n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone,
+                         freeze_bn=args.freeze_bn, freeze_stages=args.freeze_stages,
+                         dropout_rate=dropout)
+    else:
+        model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
+                     n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone,
+                     temporal_pooling=args.temporal_pooling, freeze_bn=args.freeze_bn,
+                     freeze_stages=args.freeze_stages, feature_dropout=args.feature_dropout,
+                     bidirectional=args.bidirectional)
 
     if mode == 'train':
         # Load this fold's split (written once by make_splits.py and committed)

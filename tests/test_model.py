@@ -2,7 +2,7 @@
 
 import torch
 
-from models import LRCN
+from models import LRCN, VideoCNN
 
 
 def small_lrcn():
@@ -114,3 +114,24 @@ def test_bidirectional_two_layer_lstm():
         single = torch.cat([model(x[i:i + 1]) for i in range(x.shape[0])])
     assert batched.shape == (4, 5)
     assert torch.allclose(batched, single, atol=1e-5)
+
+
+def test_video_cnn_classifies_each_clip_from_its_own_frames():
+    """The 3D CNN takes (batch, channels, time, height, width) and gives one row per clip."""
+    torch.manual_seed(0)
+    model = VideoCNN(n_classes=5, pretrained=False, freeze_bn=True, freeze_stages=1).eval()
+    assert not any(p.requires_grad for p in model.base_model.layer1.parameters())
+    assert all(p.requires_grad for p in model.base_model.layer2.parameters())
+    x = torch.rand(4, 3, 4, 32, 32)
+    with torch.no_grad():
+        before = model(x)
+        x[3] = torch.rand_like(x[3])
+        after = model(x)
+    assert before.shape == (4, 5)
+    assert torch.allclose(before[:3], after[:3], atol=1e-5)
+    model.train()
+    assert not any(m.training for m in model.base_model.modules()
+                   if isinstance(m, torch.nn.BatchNorm3d))
+    groups = model.parameter_groups(1e-3, 0.1)
+    assert len(groups) == 2 and groups[0]['lr'] == 1e-3 and abs(groups[1]['lr'] - 1e-4) < 1e-12
+    assert {id(p) for p in groups[0]['params']} == {id(p) for p in model.fc.parameters()}

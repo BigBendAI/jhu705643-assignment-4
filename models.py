@@ -11,11 +11,14 @@ Classes:
               layer of the ResNet backbone.
     LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization, and a final
           fully-connected layer to produce class logits.
+    VideoCNN: The 3D CNN the hand-over's '3dcnn' model type was written for (R3D-18 pretrained on
+          Kinetics-400), used as a third stream next to the RGB and flow LRCNs.
 """
 
 import torch
 import torch.nn as nn
 from torchvision import models
+from torchvision.models import video
 
 # ResNet constructors and their ImageNet weights. torchvision removed the ``pretrained=`` argument;
 # the current API is ``weights=``.
@@ -26,6 +29,13 @@ BACKBONES = {
     'resnet101': (models.resnet101, models.ResNet101_Weights.DEFAULT),
     'resnet152': (models.resnet152, models.ResNet152_Weights.DEFAULT),
 }
+
+# 3D CNNs pretrained on the Kinetics-400 video dataset (torchvision) for --model_type 3dcnn.
+VIDEO_BACKBONES = {
+    'r3d_18': (video.r3d_18, video.R3D_18_Weights.KINETICS400_V1),
+    'r2plus1d_18': (video.r2plus1d_18, video.R2Plus1D_18_Weights.KINETICS400_V1),
+}
+
 
 class Identity(nn.Module):
     """
@@ -226,3 +236,94 @@ class LRCN(nn.Module):
         # Pass the final output through the fully-connected layer to get class logits.
         out = self.fc(out)
         return out
+
+
+class VideoCNN(nn.Module):
+    """
+    A 3D CNN for video classification, the model the hand-over's '3dcnn' type was written for.
+
+    A 3D CNN (lecture: 3D convolution, C3D, I3D) convolves over time as well as space, so motion
+    is learned inside the network instead of by an LSTM on top of per-frame features. The backbone
+    is torchvision's R3D-18 pretrained on Kinetics-400, a video dataset, with its classifier
+    replaced by one for our classes. The input is a clip of shape (batch, channels, time, height,
+    width), which collate_fn_r3d_18 builds, at 112x112 with the Kinetics normalisation that
+    transform_stats('3dcnn') returns.
+
+    Args:
+        n_classes (int): Number of output classes.
+        pretrained (bool, optional): Use the Kinetics-400 weights. Default is True.
+        cnn_model (str, optional): 'r3d_18' or 'r2plus1d_18'. Default is 'r3d_18'.
+        freeze_bn (bool, optional): Keep the BatchNorm layers in eval mode while training (see
+            LRCN). Default is False.
+        freeze_stages (int, optional): Leading stages kept fixed, 1 = stem + layer1, ..., 4 = all
+            (see LRCN). Default is 0.
+        dropout_rate (float, optional): Dropout before the classifier. Default is 0.0.
+    """
+    def __init__(self, n_classes, pretrained=True, cnn_model='r3d_18', freeze_bn=False,
+                 freeze_stages=0, dropout_rate=0.0):
+        super().__init__()
+        if cnn_model not in VIDEO_BACKBONES:
+            raise ValueError('The 3D CNN backbone is not supported, choose r3d_18 or r2plus1d_18.')
+        constructor, weights = VIDEO_BACKBONES[cnn_model]
+        self.base_model = constructor(weights=weights if pretrained else None)
+        num_features = self.base_model.fc.in_features
+        self.base_model.fc = Identity()
+        self.freeze_bn = freeze_bn
+        self.freeze_backbone_stages(freeze_stages)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.fc = nn.Linear(num_features, n_classes)
+
+    def train(self, mode=True):
+        """Switch modes; with freeze_bn the backbone's BatchNorm layers stay in eval mode."""
+        super().train(mode)
+        if mode and self.freeze_bn:
+            for module in self.base_model.modules():
+                if isinstance(module, nn.BatchNorm3d):
+                    module.eval()
+        return self
+
+    def freeze_backbone_stages(self, n_stages):
+        """
+        Freeze the stem and the first n_stages residual stages of the backbone.
+
+        Args:
+            n_stages (int): 0 = nothing frozen, 1 = stem + layer1, ..., 4 = the whole backbone.
+        """
+        if not 0 <= n_stages <= 4:
+            raise ValueError('freeze_stages must be between 0 and 4')
+        if n_stages == 0:
+            return
+        frozen = [self.base_model.stem]
+        frozen += [getattr(self.base_model, f'layer{i}') for i in range(1, n_stages + 1)]
+        for module in frozen:
+            for param in module.parameters():
+                param.requires_grad_(False)
+
+    def parameter_groups(self, learning_rate, backbone_lr_mult=1.0):
+        """
+        Optimizer parameter groups: the new classifier and the pretrained backbone (see LRCN).
+
+        Args:
+            learning_rate (float): Learning rate of the classifier.
+            backbone_lr_mult (float): Multiplier for the backbone's learning rate.
+
+        Returns:
+            list: Dicts with 'params' and 'lr'; the head first, then the backbone (if trainable).
+        """
+        backbone = [p for p in self.base_model.parameters() if p.requires_grad]
+        groups = [{'params': list(self.fc.parameters()), 'lr': learning_rate}]
+        if backbone:
+            groups.append({'params': backbone, 'lr': learning_rate * backbone_lr_mult})
+        return groups
+
+    def forward(self, x):
+        """
+        Classify a batch of clips.
+
+        Args:
+            x (Tensor): Clips of shape (batch_size, channels, time_steps, height, width).
+
+        Returns:
+            Tensor: Logits of shape (batch_size, n_classes).
+        """
+        return self.fc(self.dropout(self.base_model(x)))
