@@ -81,13 +81,16 @@ class LRCN(nn.Module):
             hold generic edge and texture filters that need no adaptation. Default is 0.
         feature_dropout (float, optional): Dropout on every frame's CNN feature vector before
             the LSTM. Default is 0.0.
+        bidirectional (bool, optional): Read the frame sequence forwards and backwards with two
+            LSTMs whose outputs are concatenated, so each time step's output knows the whole
+            clip. Default is False.
 
     Raises:
         ValueError: If the specified cnn_model or temporal_pooling is not supported.
     """
     def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True,
                  cnn_model='resnet34', temporal_pooling='last', freeze_bn=False, freeze_stages=0,
-                 feature_dropout=0.0):
+                 feature_dropout=0.0, bidirectional=False):
         super(LRCN, self).__init__()
         if temporal_pooling not in ('last', 'late_fusion'):
             raise ValueError("temporal_pooling must be 'last' or 'late_fusion'")
@@ -115,13 +118,17 @@ class LRCN(nn.Module):
         # Define the LSTM to process the sequence of frame features. batch_first=True makes it
         # read its input as (batch, time, features), which is what forward() builds. Without it
         # the LSTM expects (time, batch, features) and reads the batch axis as time.
-        self.rnn = nn.LSTM(num_features, hidden_size, n_layers, batch_first=True)
+        # With more than one layer, dropout_rate is also applied between the stacked layers.
+        self.rnn = nn.LSTM(num_features, hidden_size, n_layers, batch_first=True,
+                           dropout=dropout_rate if n_layers > 1 else 0.0,
+                           bidirectional=bidirectional)
         
         # Define dropout for regularization.
         self.dropout = nn.Dropout(dropout_rate)
         
-        # Final fully-connected layer to produce logits for each class.
-        self.fc = nn.Linear(hidden_size, n_classes)
+        # Final fully-connected layer to produce logits for each class (a bidirectional LSTM
+        # outputs the forward and backward hidden states side by side).
+        self.fc = nn.Linear(hidden_size * (2 if bidirectional else 1), n_classes)
 
     def train(self, mode=True):
         """

@@ -92,6 +92,8 @@ def args_parser():
                         help='backbone stages kept fixed: 1 = stem + layer1 ... 4 = all')
     parser.add_argument('--feature_dropout', type=float, default=0.0,
                         help='dropout on the per-frame CNN features before the LSTM')
+    parser.add_argument('--bidirectional', action=argparse.BooleanOptionalAction, default=False,
+                        help='bidirectional LSTM (forward and backward reads, concatenated)')
 
     parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
@@ -223,7 +225,8 @@ def main(args):
     model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
                  n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone,
                  temporal_pooling=args.temporal_pooling, freeze_bn=args.freeze_bn,
-                 freeze_stages=args.freeze_stages, feature_dropout=args.feature_dropout)
+                 freeze_stages=args.freeze_stages, feature_dropout=args.feature_dropout,
+                 bidirectional=args.bidirectional)
 
     if mode == 'train':
         # Load this fold's split (written once by make_splits.py and committed)

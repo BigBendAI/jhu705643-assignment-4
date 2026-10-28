@@ -99,3 +99,18 @@ def test_freeze_stages_and_parameter_groups():
     assert sorted(grouped) == sorted(trainable) and len(grouped) == len(set(grouped))
     new_layers = list(model.rnn.parameters()) + list(model.fc.parameters())
     assert {id(p) for p in head['params']} == {id(p) for p in new_layers}
+
+
+def test_bidirectional_two_layer_lstm():
+    """Two stacked bidirectional layers still give one row of logits per video."""
+    torch.manual_seed(0)
+    model = LRCN(hidden_size=8, n_layers=2, dropout_rate=0.5, n_classes=5, pretrained=False,
+                 cnn_model='resnet18', bidirectional=True, temporal_pooling='late_fusion').eval()
+    assert model.rnn.bidirectional and model.rnn.num_layers == 2 and model.rnn.dropout == 0.5
+    assert model.fc.in_features == 16
+    x = clips()
+    with torch.no_grad():
+        batched = model(x)
+        single = torch.cat([model(x[i:i + 1]) for i in range(x.shape[0])])
+    assert batched.shape == (4, 5)
+    assert torch.allclose(batched, single, atol=1e-5)
