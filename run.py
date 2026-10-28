@@ -28,7 +28,7 @@ import argparse
 import torch
 import torch.nn as nn
 from torch import optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau, LinearLR, SequentialLR
 
 import wandb
 
@@ -83,12 +83,33 @@ def args_parser():
                         help='Use pretrained 2D CNN backbone')
     parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
     parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1, help='Number of RNN/LSTM layers')
+    # Fine-tuning recipe (all off by default = the hand-over's design)
+    parser.add_argument('--temporal_pooling', choices=['last', 'late_fusion'], default='last',
+                        help="classify the last LSTM output, or every frame's output averaged")
+    parser.add_argument('--freeze_bn', action=argparse.BooleanOptionalAction, default=False,
+                        help="keep the backbone's BatchNorm layers in eval mode while training")
+    parser.add_argument('--freeze_stages', type=int, default=0,
+                        help='backbone stages kept fixed: 1 = stem + layer1 ... 4 = all')
+    parser.add_argument('--feature_dropout', type=float, default=0.0,
+                        help='dropout on the per-frame CNN features before the LSTM')
 
     parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
     parser.add_argument('-d', '--dropout', type=float, default=0.1, help='Dropout rate for regularization')
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
+    parser.add_argument('--backbone_lr_mult', type=float, default=1.0,
+                        help='learning rate multiplier for the pretrained backbone (e.g. 0.1)')
+    parser.add_argument('--optimizer', choices=['adam', 'adamw'], default='adam')
+    parser.add_argument('--weight_decay', type=float, default=0.0)
+    parser.add_argument('--scheduler', choices=['plateau', 'cosine'], default='plateau',
+                        help='halve the LR when val loss stalls (hand-over) or cosine over the run')
+    parser.add_argument('--warmup_epochs', type=int, default=0,
+                        help='epochs of linear LR warm-up before the cosine schedule')
+    parser.add_argument('--label_smoothing', type=float, default=0.0)
+    parser.add_argument('--aug', choices=['basic', 'strong'], default='basic',
+                        help="training augmentation: the hand-over's flip + shift, "
+                             "or also a random crop and brightness/contrast jitter")
 
     parser.add_argument('--wandb_project', default='jhu705643-a4-ucf50-lrcn',
                         help='Weights & Biases project')
@@ -120,6 +141,35 @@ def load_split(fold, frame_dir, split_dir='splits'):
                            f'e.g. {sorted(shared)[:3]}')
     print(f'Loaded {csv_path}: ' + ', '.join(f'{name} {len(clips)}' for name, clips in splits.items()))
     return splits
+
+
+def make_optimizer_and_scheduler(model, args):
+    """
+    Build the optimizer and the learning rate scheduler from the command-line choices.
+
+    Args:
+        model (LRCN): The model whose parameters are optimised.
+        args (argparse.Namespace): learning_rate, backbone_lr_mult, optimizer, weight_decay,
+            scheduler, warmup_epochs, n_epochs.
+
+    Returns:
+        tuple: (optimizer, scheduler).
+    """
+    groups = model.parameter_groups(args.learning_rate, args.backbone_lr_mult)
+    if args.optimizer == 'adamw':
+        opt = optim.AdamW(groups, lr=args.learning_rate, weight_decay=args.weight_decay)
+    else:
+        opt = optim.Adam(groups, lr=args.learning_rate, weight_decay=args.weight_decay)
+    if args.scheduler == 'plateau':
+        return opt, ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
+    # Cosine decay to zero over the epochs after the warm-up; the warm-up ramps the learning
+    # rate from 10% to 100% so the randomly initialised layers do not disturb the pretrained
+    # backbone in the first epochs.
+    cosine = CosineAnnealingLR(opt, T_max=max(1, args.n_epochs - args.warmup_epochs))
+    if args.warmup_epochs == 0:
+        return opt, cosine
+    warmup = LinearLR(opt, start_factor=0.1, total_iters=args.warmup_epochs)
+    return opt, SequentialLR(opt, [warmup, cosine], milestones=[args.warmup_epochs])
 
 
 def main(args):
@@ -162,16 +212,18 @@ def main(args):
     mode = args.mode
     batch_size = args.batch_size
     n_epochs = args.n_epochs
-    learning_rate = args.learning_rate
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Load transformation statistics and create data augmentation transforms
     h, w, mean, std = transform_stats(model_type)
-    tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std)
+    tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std,
+                                                               strong=args.aug == 'strong')
 
     # Initialize the model (LRCN)
     model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
-                 n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
+                 n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone,
+                 temporal_pooling=args.temporal_pooling, freeze_bn=args.freeze_bn,
+                 freeze_stages=args.freeze_stages, feature_dropout=args.feature_dropout)
 
     if mode == 'train':
         # Load this fold's split (written once by make_splits.py and committed)
@@ -189,9 +241,8 @@ def main(args):
         dataloaders.update(test_dloaders(ts_dataset, batch_size, model_type, args.num_workers))
 
         # Define the loss function, optimizer, and learning rate scheduler
-        loss_func = nn.CrossEntropyLoss(reduction='sum')
-        opt = optim.Adam(model.parameters(), lr=learning_rate)
-        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
+        loss_func = nn.CrossEntropyLoss(reduction='sum', label_smoothing=args.label_smoothing)
+        opt, lr_scheduler = make_optimizer_and_scheduler(model, args)
         os.makedirs("./models", exist_ok=True)
         optim_model_dir = './models'
 

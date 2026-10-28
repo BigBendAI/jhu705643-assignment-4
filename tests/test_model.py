@@ -55,3 +55,47 @@ def test_frame_order_matters():
         forward_order = model(x)
         reversed_order = model(x.flip(1))
     assert not torch.allclose(forward_order, reversed_order, atol=1e-5)
+
+
+def test_late_fusion_averages_per_frame_logits():
+    """late_fusion gives one row of logits per video and differs from last-step classification."""
+    torch.manual_seed(0)
+    model = LRCN(hidden_size=8, n_layers=1, dropout_rate=0.1, n_classes=5, pretrained=False,
+                 cnn_model='resnet18', temporal_pooling='late_fusion').eval()
+    x = clips()
+    with torch.no_grad():
+        fused = model(x)
+        model.temporal_pooling = 'last'
+        last = model(x)
+    assert fused.shape == (4, 5)
+    assert not torch.allclose(fused, last)
+
+
+def test_freeze_bn_keeps_backbone_batchnorm_in_eval_mode():
+    """In training mode the backbone's BatchNorm layers stay in eval mode when freeze_bn is set."""
+    model = LRCN(hidden_size=8, n_layers=1, dropout_rate=0.1, n_classes=5, pretrained=False,
+                 cnn_model='resnet18', freeze_bn=True).train()
+    assert model.training and model.rnn.training
+    assert not any(m.training for m in model.base_model.modules()
+                   if isinstance(m, torch.nn.BatchNorm2d))
+    plain = LRCN(hidden_size=8, n_layers=1, dropout_rate=0.1, n_classes=5, pretrained=False,
+                 cnn_model='resnet18').train()
+    assert all(m.training for m in plain.base_model.modules()
+               if isinstance(m, torch.nn.BatchNorm2d))
+
+
+def test_freeze_stages_and_parameter_groups():
+    """freeze_stages=1 fixes stem + layer1; the groups hold each trainable parameter once."""
+    model = LRCN(hidden_size=8, n_layers=1, dropout_rate=0.1, n_classes=5, pretrained=False,
+                 cnn_model='resnet18', freeze_stages=1)
+    assert not any(p.requires_grad for p in model.base_model.layer1.parameters())
+    assert all(p.requires_grad for p in model.base_model.layer2.parameters())
+    groups = model.parameter_groups(1e-3, 0.1)
+    assert len(groups) == 2
+    head, backbone = groups[0], groups[1]
+    assert head['lr'] == 1e-3 and abs(backbone['lr'] - 1e-4) < 1e-12
+    grouped = [id(p) for g in (head, backbone) for p in g['params']]
+    trainable = [id(p) for p in model.parameters() if p.requires_grad]
+    assert sorted(grouped) == sorted(trainable) and len(grouped) == len(set(grouped))
+    new_layers = list(model.rnn.parameters()) + list(model.fc.parameters())
+    assert {id(p) for p in head['params']} == {id(p) for p in new_layers}

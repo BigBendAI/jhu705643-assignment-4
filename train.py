@@ -40,7 +40,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         model (torch.nn.Module): The video classification model to be trained.
         criterion (callable): Loss function.
         optimizer (torch.optim.Optimizer): Optimizer for updating model weights.
-        scheduler (torch.optim.lr_scheduler): Learning rate scheduler, which adjusts the learning rate based on validation loss.
+        scheduler (torch.optim.lr_scheduler): Learning rate scheduler: ReduceLROnPlateau (stepped
+            with the validation loss) or an epoch-wise scheduler such as the cosine schedule.
         device (torch.device): Device (CPU or GPU) on which to perform training.
         optim_model_wts_dir (str): Directory to save the best model weights.
         n_epochs (int, optional): Number of training epochs. Default is 30.
@@ -96,11 +97,16 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
                 record.update({'test/loss': test_loss, 'test/acc': test_accuracy})
             wandb.log(record)
 
-        # Update learning rate based on validation loss
-        scheduler.step(val_loss)
-        if current_lr != get_learning_rate(optimizer):
-            print('Loading best model weights!')
-            model.load_state_dict(best_model_wts)
+        # Update the learning rate. The hand-over's plateau scheduler halves it when the
+        # validation loss stalls and then restarts from the best weights; a cosine schedule
+        # changes it every epoch and simply continues.
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(val_loss)
+            if current_lr != get_learning_rate(optimizer):
+                print('Loading best model weights!')
+                model.load_state_dict(best_model_wts)
+        else:
+            scheduler.step()
 
         print("train loss: {:.6f}, val loss: {:.6f}, accuracy: {:.2f}".format(train_loss, val_loss, 100*val_accuracy))
         if test_accuracy is not None:
@@ -139,7 +145,8 @@ def get_learning_rate(optimizer):
         optimizer (torch.optim.Optimizer): The optimizer from which to get the learning rate.
     
     Returns:
-        float: The current learning rate.
+        float: The current learning rate of the first parameter group (the LSTM and classifier
+            when LRCN.parameter_groups is used; the backbone group may have a smaller one).
     """
     for param_group in optimizer.param_groups:
         return param_group['lr']

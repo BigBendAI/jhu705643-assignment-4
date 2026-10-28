@@ -70,12 +70,29 @@ class LRCN(nn.Module):
         cnn_model (str, optional): Specifies the ResNet variant to use as the backbone.
                                    Options: 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'.
                                    Default is 'resnet34'.
-    
+        temporal_pooling (str, optional): 'last' classifies the LSTM output of the last frame
+            (the hand-over); 'late_fusion' classifies every frame's output and averages the
+            logits over time, as the LRCN paper does. Default is 'last'.
+        freeze_bn (bool, optional): Keep the backbone's BatchNorm layers in eval mode while
+            training, so they use the ImageNet running statistics instead of re-estimating them
+            from a few clips per batch. Default is False.
+        freeze_stages (int, optional): Number of leading backbone stages whose weights stay
+            fixed: 1 = stem + layer1, 2 = + layer2, ..., 4 = the whole backbone. Early stages
+            hold generic edge and texture filters that need no adaptation. Default is 0.
+        feature_dropout (float, optional): Dropout on every frame's CNN feature vector before
+            the LSTM. Default is 0.0.
+
     Raises:
-        ValueError: If the specified cnn_model is not supported.
+        ValueError: If the specified cnn_model or temporal_pooling is not supported.
     """
-    def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True, cnn_model='resnet34'):
+    def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True,
+                 cnn_model='resnet34', temporal_pooling='last', freeze_bn=False, freeze_stages=0,
+                 feature_dropout=0.0):
         super(LRCN, self).__init__()
+        if temporal_pooling not in ('last', 'late_fusion'):
+            raise ValueError("temporal_pooling must be 'last' or 'late_fusion'")
+        self.temporal_pooling = temporal_pooling
+        self.freeze_bn = freeze_bn
 
         # Set up the ResNet backbone as a 2D CNN feature extractor. (The original built a resnet34
         # when 'resnet152' was requested.)
@@ -92,6 +109,8 @@ class LRCN(nn.Module):
         # channels-last (NHWC) is the layout the GPU convolution kernels are fastest in; the weights
         # are stored that way once, and forward() hands the frames over in the same layout.
         self.base_model = base_cnn.to(memory_format=torch.channels_last)
+        self.freeze_backbone_stages(freeze_stages)
+        self.feature_dropout = nn.Dropout(feature_dropout)
 
         # Define the LSTM to process the sequence of frame features. batch_first=True makes it
         # read its input as (batch, time, features), which is what forward() builds. Without it
@@ -104,6 +123,63 @@ class LRCN(nn.Module):
         # Final fully-connected layer to produce logits for each class.
         self.fc = nn.Linear(hidden_size, n_classes)
 
+    def train(self, mode=True):
+        """
+        Switch between train and eval mode; with freeze_bn the backbone's BatchNorm stays in eval.
+
+        Args:
+            mode (bool): True for training mode, False for eval mode.
+
+        Returns:
+            LRCN: self.
+        """
+        super().train(mode)
+        if mode and self.freeze_bn:
+            for module in self.base_model.modules():
+                if isinstance(module, nn.BatchNorm2d):
+                    module.eval()
+        return self
+
+    def freeze_backbone_stages(self, n_stages):
+        """
+        Freeze the stem and the first n_stages residual stages of the ResNet backbone.
+
+        Args:
+            n_stages (int): 0 = nothing frozen, 1 = stem + layer1, ..., 4 = the whole backbone.
+        """
+        if not 0 <= n_stages <= 4:
+            raise ValueError('freeze_stages must be between 0 and 4')
+        if n_stages == 0:
+            return
+        frozen = [self.base_model.conv1, self.base_model.bn1]
+        frozen += [getattr(self.base_model, f'layer{i}') for i in range(1, n_stages + 1)]
+        for module in frozen:
+            for param in module.parameters():
+                param.requires_grad_(False)
+
+    def parameter_groups(self, learning_rate, backbone_lr_mult=1.0):
+        """
+        Optimizer parameter groups: the new layers (LSTM, classifier) and the pretrained backbone.
+
+        The backbone already knows useful features and only needs small adjustments, so it can
+        get a smaller learning rate than the randomly initialised layers. Frozen parameters are
+        left out.
+
+        Args:
+            learning_rate (float): Learning rate of the LSTM and the classifier.
+            backbone_lr_mult (float): Multiplier for the backbone's learning rate.
+
+        Returns:
+            list: Dicts with 'params' and 'lr'; the head first, then the backbone (if trainable).
+        """
+        backbone_ids = {id(p) for p in self.base_model.parameters()}
+        head = [p for p in self.parameters() if id(p) not in backbone_ids and p.requires_grad]
+        backbone = [p for p in self.base_model.parameters() if p.requires_grad]
+        groups = [{'params': head, 'lr': learning_rate}]
+        if backbone:
+            groups.append({'params': backbone, 'lr': learning_rate * backbone_lr_mult})
+        return groups
+
     def forward(self, x):
         """
         Forward pass for the LRCN model.
@@ -113,9 +189,10 @@ class LRCN(nn.Module):
         
         The CNN backbone extracts a feature vector from every frame of every video in one call.
         The features are reshaped to (batch_size, time_steps, features) and the LSTM reads each
-        video's frames as one sequence. The output at the last time step is passed through
-        dropout and the final fully-connected layer to produce the class logits. Each video's
-        logits depend only on its own frames.
+        video's frames as one sequence. With temporal_pooling 'last' the output at the last time
+        step is passed through dropout and the final fully-connected layer to produce the class
+        logits; with 'late_fusion' every time step is classified and the logits are averaged.
+        Each video's logits depend only on its own frames.
 
         Args:
             x (Tensor): Input tensor of shape (batch_size, time_steps, channels, height, width).
@@ -130,7 +207,11 @@ class LRCN(nn.Module):
         y = self.base_model(frames)
 
         # One sequence of ts feature vectors per video: (bs, ts, features). One LSTM call.
-        out, _ = self.rnn(y.view(bs, ts, -1))
+        out, _ = self.rnn(self.feature_dropout(y.view(bs, ts, -1)))
+
+        if self.temporal_pooling == 'late_fusion':
+            # One prediction per frame, averaged over time (the paper's choice).
+            return self.fc(self.dropout(out)).mean(dim=1)
 
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])

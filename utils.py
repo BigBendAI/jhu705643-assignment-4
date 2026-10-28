@@ -118,7 +118,7 @@ def transform_stats(model='lrcn'):
     return h, w, mean, std
 
 
-def compose_data_transforms(height, width, mean, std):
+def compose_data_transforms(height, width, mean, std, strong=False):
     """
     Compose and return data transforms for training and validation/test datasets.
 
@@ -133,19 +133,33 @@ def compose_data_transforms(height, width, mean, std):
         width (int): Desired image width.
         mean (list): Mean values for normalization.
         std (list): Standard deviation values for normalization.
+        strong (bool): If True, the training transforms also take a random crop covering 70-100%
+            of each side (resized back to height x width) and jitter brightness and contrast by
+            up to 30%, all drawn once per clip. More variety per epoch means less memorising of
+            the training clips. Default False gives the hand-over's flip and 10% translation.
 
     Returns:
         tuple: (train_transforms, val_test_transforms)
             - train_transforms: Composed transforms for the training set.
             - val_test_transforms: Composed transforms for the validation/test set.
     """
-    train_transforms = v2.Compose([
-        v2.Resize((height, width)),
-        v2.RandomHorizontalFlip(p=0.5),
-        v2.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        v2.ToDtype(torch.float32, scale=True),
-        v2.Normalize(mean, std),
-    ])
+    if strong:
+        train_transforms = v2.Compose([
+            v2.RandomResizedCrop((height, width), scale=(0.49, 1.0), ratio=(0.9, 1.1),
+                                 antialias=True),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.ColorJitter(brightness=0.3, contrast=0.3),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean, std),
+        ])
+    else:
+        train_transforms = v2.Compose([
+            v2.Resize((height, width)),
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean, std),
+        ])
     val_test_transforms = v2.Compose([
         v2.Resize((height, width)),
         v2.ToDtype(torch.float32, scale=True),
