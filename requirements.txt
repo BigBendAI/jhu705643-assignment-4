@@ -1,7 +1,12 @@
-torch
-torchvision
-opencv-python
-scikit-learn
-tqdm
-numpy
-Pillow
+# Versions used for all reported results (Python 3.10, CUDA 12.6 build of torch/torchvision).
+torch==2.12.1
+torchvision==0.27.1
+opencv-python-headless==4.14.0.94
+scikit-learn==1.7.2
+tqdm==4.70.1
+numpy==2.2.6
+Pillow==12.3.0
+wandb==0.30.0
+# development
+pytest==9.1.1
+pylint==4.1.2

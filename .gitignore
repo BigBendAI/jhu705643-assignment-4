@@ -1,0 +1,11 @@
+# data and frames live outside the repo
+data/
+# written by training
+models/
+splits.npy
+wandb/
+*.pt
+# python
+__pycache__/
+*.pyc
+.pytest_cache/

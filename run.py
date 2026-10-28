@@ -31,6 +31,7 @@ from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 import numpy as np
+import wandb
 
 from video_datasets import VideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
@@ -74,7 +75,10 @@ def args_parser():
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
     parser.add_argument('-mt', '--model_type', help='3D CNN or LRCN', default='lrcn')
     parser.add_argument('-cnn', '--cnn_backbone', default='resnet34', help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
-    parser.add_argument('-p', '--pretrained', help='Use pretrained 2D CNN backbone', default=True)
+    # A plain default=True argument receives the *string* 'False' from the command line, which is
+    # truthy; BooleanOptionalAction gives real --pretrained / --no-pretrained flags.
+    parser.add_argument('-p', '--pretrained', action=argparse.BooleanOptionalAction, default=True,
+                        help='Use pretrained 2D CNN backbone')
     parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
     parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1, help='Number of RNN/LSTM layers')
 
@@ -83,6 +87,11 @@ def args_parser():
     parser.add_argument('-d', '--dropout', type=float, default=0.1, help='Dropout rate for regularization')
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
+
+    parser.add_argument('--wandb_project', default='jhu705643-a4-ucf50-lrcn',
+                        help='Weights & Biases project')
+    parser.add_argument('--run_name', default=None,
+                        help='Weights & Biases run name (default: chosen by W&B)')
 
     args = parser.parse_args()
     return args
@@ -151,21 +160,26 @@ def main(args):
                   'test': np.array(ts_split)}
         np.save('./splits.npy', splits)
 
-        # Create PyTorch Datasets and DataLoaders for train and validation
+        # Create PyTorch Datasets and DataLoaders for train, validation and test. The test loader is
+        # only used to log test loss/accuracy per epoch; model selection uses validation.
         tr_dataset = VideoDataset(tr_split, fr_per_vid, tr_transforms)
         val_dataset = VideoDataset(val_split, fr_per_vid, val_ts_transforms)
+        ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
         dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type)
+        dataloaders.update(test_dloaders(ts_dataset, batch_size, model_type))
 
         # Define the loss function, optimizer, and learning rate scheduler
         loss_func = nn.CrossEntropyLoss(reduction='sum')
         opt = optim.Adam(model.parameters(), lr=learning_rate)
-        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5, verbose=1)
+        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
         os.makedirs("./models", exist_ok=True)
         optim_model_dir = './models'
 
-        # Main training procedure
+        # Main training procedure, with every epoch logged to Weights & Biases
+        wandb.init(project=args.wandb_project, name=args.run_name, config=vars(args))
         model.to(device)
         model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs)
+        wandb.finish()
 
     elif mode == 'eval':
         # Load saved dataset splits
@@ -178,7 +192,7 @@ def main(args):
         dataloaders = test_dloaders(ts_dataset, batch_size, model_type)
 
         # Load the trained model checkpoint
-        model.load_state_dict(torch.load(args.ckpt))
+        model.load_state_dict(torch.load(args.ckpt, map_location=device))
         model.to(device)
         targets, outputs, accuracy = test(model, dataloaders['test'], device)
 

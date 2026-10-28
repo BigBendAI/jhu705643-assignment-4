@@ -30,31 +30,34 @@ def get_frames(vid, n_frames=1):
     Returns:
         tuple: (frames, v_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
-            - v_len (int): Total number of frames in the video.
-            
+            - v_len (int): Number of frames that could be decoded from the video.
+
     Notes:
         - If the video cannot be opened or contains no frames, an empty list and 0 are returned.
-        - Frames are sampled at uniformly spaced indices.
+        - The whole clip is decoded first and the sample positions are taken over the frames
+          actually decoded. The frame count reported by the container (CAP_PROP_FRAME_COUNT) is
+          an estimate and is often larger than what can be decoded, so sampling positions from it
+          loses the last frame(s) of about 3% of the UCF50 clips.
+        - Frames are sampled at n_frames evenly spaced positions, first and last frame included.
     """
     frames = []
     v_cap = cv2.VideoCapture(vid)
     if not v_cap.isOpened():
         print("Failed to open video:", vid)
         return frames, 0
-    v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if v_len <= 0:
-        print("No frames found in video:", vid)
-        v_cap.release()
-        return frames, 0
-    frame_idx = np.linspace(0, v_len-1, n_frames+1, dtype=np.int16)
-    for idx in range(v_len):
+    decoded = []
+    while True:
         success, frame = v_cap.read()
         if not success:
-            continue
-        if idx in frame_idx:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
+            break
+        decoded.append(frame)
     v_cap.release()
+    v_len = len(decoded)
+    if v_len == 0:
+        print("No frames found in video:", vid)
+        return frames, 0
+    frame_idx = np.linspace(0, v_len - 1, n_frames).round().astype(int)
+    frames = [cv2.cvtColor(decoded[idx], cv2.COLOR_BGR2RGB) for idx in frame_idx]
     return frames, v_len
 
 
@@ -72,11 +75,13 @@ def store_frames(frames, store_path):
     Returns:
         None
     """
+    os.makedirs(store_path, exist_ok=True)
     for idx, frame in enumerate(frames):
-        print("processing")
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        path_to_frame = os.path.join(store_path, "frame{}.jpg".format(idx))
-        cv2.imwrite(path_to_frame, frame)
+        # Zero-padded names so that a plain sort gives the temporal order (frame_010 after 009).
+        path_to_frame = os.path.join(store_path, f"frame_{idx:03d}.jpg")
+        if not cv2.imwrite(path_to_frame, frame):
+            raise IOError(f"Could not write frame to {path_to_frame}")
 
 
 def transform_stats(model='lrcn'):

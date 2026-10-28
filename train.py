@@ -18,6 +18,7 @@ import os
 import copy
 from tqdm import tqdm
 import torch
+import wandb
 
 def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30):
     """
@@ -29,7 +30,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
     The model with the best validation accuracy is saved to disk.
 
     Args:
-        dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders.
+        dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders, optionally 'test'
+                            (evaluated every epoch for logging only; never used for model selection).
         model (torch.nn.Module): The video classification model to be trained.
         criterion (callable): Loss function.
         optimizer (torch.optim.Optimizer): Optimizer for updating model weights.
@@ -74,6 +76,21 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         loss_hist['val'].append(val_loss)
         acc_hist['val'].append(val_accuracy)
 
+        # Test phase (logging only)
+        test_loss, test_accuracy = None, None
+        if 'test' in dataloaders:
+            with torch.no_grad():
+                test_loss, test_accuracy = get_epoch_loss(model, criterion, dataloaders['test'], device)
+
+        # One Weights & Biases record per epoch (skipped when no run was started, e.g. in tests)
+        if wandb.run is not None:
+            record = {'epoch': epoch + 1, 'lr': current_lr,
+                      'train/loss': train_loss, 'train/acc': train_accuracy,
+                      'val/loss': val_loss, 'val/acc': val_accuracy}
+            if test_loss is not None:
+                record.update({'test/loss': test_loss, 'test/acc': test_accuracy})
+            wandb.log(record)
+
         # Update learning rate based on validation loss
         scheduler.step(val_loss)
         if current_lr != get_learning_rate(optimizer):
@@ -81,6 +98,8 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
             model.load_state_dict(best_model_wts)
 
         print("train loss: {:.6f}, val loss: {:.6f}, accuracy: {:.2f}".format(train_loss, val_loss, 100*val_accuracy))
+        if test_accuracy is not None:
+            print("test loss: {:.6f}, test accuracy: {:.2f}".format(test_loss, 100*test_accuracy))
         print("-" * 60)
         print()
 
