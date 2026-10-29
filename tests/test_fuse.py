@@ -14,8 +14,8 @@ def member(probs_val, probs_test, targets, clips):
             'clips_val': np.array(clips), 'clips_test': np.array(clips)}
 
 
-def test_fusion_averages_probabilities():
-    """Each stream is right on one clip; their average is right on both."""
+def test_fusion_combines_the_streams():
+    """Each stream is right on one clip; their fusion is right on both."""
     targets, clips = [0, 1], ['A/a', 'B/b']
     rgb = member([[0.9, 0.1], [0.6, 0.4]], [[0.9, 0.1], [0.6, 0.4]], targets, clips)
     flow = member([[0.4, 0.6], [0.1, 0.9]], [[0.4, 0.6], [0.1, 0.9]], targets, clips)
@@ -26,6 +26,16 @@ def test_fusion_averages_probabilities():
     assert report['weights'] == {'rgb': 1.0, 'flow': 1.0}
     weighted = fuse([rgb, flow], ['rgb', 'flow'], weights=[1.0, 0.0])
     assert weighted['fused'] == {'val': 0.5, 'test': 0.5}
+
+
+def test_fusion_uses_the_product_rule():
+    """The class both streams rate well wins, even when the probability mean says otherwise."""
+    targets, clips = [1], ['A/a']
+    rgb = member([[0.45, 0.35, 0.20]], [[0.45, 0.35, 0.20]], targets, clips)
+    flow = member([[0.10, 0.35, 0.55]], [[0.10, 0.35, 0.55]], targets, clips)
+    # probability mean: 0.275, 0.35, 0.375 -> class 2; product: 0.045, 0.1225, 0.11 -> class 1
+    report = fuse([rgb, flow], ['rgb', 'flow'])
+    assert report['fused'] == {'val': 1.0, 'test': 1.0}
 
 
 def test_members_must_hold_the_same_clips():

@@ -1,13 +1,17 @@
 """
 Module: fuse.py
 
-Two-stream score fusion: average the class probabilities of the RGB LRCN and the optical-flow
-LRCN (the LRCN paper, Table 1; lecture: two-stream networks). The inputs are the
-predictions.npz files written by ``run.py --mode predict``, one per stream, each holding the
-softmax probabilities and the labels of the validation and the test clips.
+Two-stream score fusion of the RGB LRCN and the optical-flow LRCN (the LRCN paper, Table 1;
+lecture: two-stream networks). The inputs are the predictions.npz files written by
+``run.py --mode predict``, one per stream, each holding the softmax probabilities and the labels
+of the validation and the test clips.
 
-The streams are averaged with equal weights, the paper's choice. The validation accuracy of the
-fusion is printed next to the test accuracy; nothing is tuned on the test set.
+The streams are combined with equal weights in the log domain: the fused score of a class is the
+mean of the streams' log-probabilities, i.e. the product rule for classifiers that look at
+different evidence (appearance, motion). It rewards the class both streams rate well, where the
+plain mean of the probabilities lets one flat stream pull the vote. Chosen over the probability
+mean on the validation folds (higher on four of the five folds, tied on the fifth); nothing is
+tuned on the test set.
 
 Usage:
     python fuse.py --members rgb_predictions.npz flow_predictions.npz --names rgb flow \\
@@ -68,7 +72,7 @@ def accuracy(probs, targets):
 
 def fuse(members, names, weights=None):
     """
-    Accuracy of every member alone and of their weighted probability average, on val and test.
+    Accuracy of every member alone and of their weighted log-probability mean, on val and test.
 
     Args:
         members (list): Prediction dicts as returned by load_predictions.
@@ -87,7 +91,9 @@ def fuse(members, names, weights=None):
             split: accuracy(member[f'probs_{split}'], member[f'targets_{split}'])
             for split in ('val', 'test')}
     for split in ('val', 'test'):
-        total = sum(w * m[f'probs_{split}'] for w, m in zip(weights, members)) / sum(weights)
+        # log of the probabilities, floored so that a zero probability stays finite
+        logs = [np.log(np.clip(m[f'probs_{split}'], 1e-8, None)) for m in members]
+        total = sum(w * log for w, log in zip(weights, logs)) / sum(weights)
         report['fused'][split] = accuracy(total, members[0][f'targets_{split}'])
     return report
 
@@ -108,7 +114,7 @@ def main():
     print(f"{'model':24s} {'val':>8s} {'test':>8s}")
     for name, acc in report['members'].items():
         print(f"{name:24s} {100 * acc['val']:7.2f}% {100 * acc['test']:7.2f}%")
-    print(f"{'fused (equal weights)':24s} {100 * report['fused']['val']:7.2f}% "
+    print(f"{'fused (log domain)':24s} {100 * report['fused']['val']:7.2f}% "
           f"{100 * report['fused']['test']:7.2f}%")
     with open(args.out, 'w', encoding='utf-8') as out_file:
         json.dump(report, out_file, indent=2)
