@@ -9,6 +9,8 @@
 # Training reads FRAME_DIR / FLOW_DIR (32 stored frames per clip); prediction reads
 # EVAL_FRAME_DIR / EVAL_FLOW_DIR (64 stored frames, preprocess.py --n_frames 64) and averages
 # N_VIEWS interleaved 16-frame clips per video. They default to the training folders.
+# EVAL_SIZE / EVAL_SIZE_3D: the val/test frame size at prediction time (256 / 128; the training
+# sizes are 224 / 112; set both to 0 for the training sizes; see run.py build_transforms).
 # Each fold writes OUT_DIR/fold<k>/{rgb_best.pt, flow_best.pt, rgb.npz, flow.npz, fusion.json}
 # and, with STREAMS=3, {3dcnn_best.pt, 3dcnn.npz, fusion3.json}.
 set -e
@@ -19,6 +21,8 @@ STREAMS="${STREAMS:-2}"
 EVAL_FRAME_DIR="${EVAL_FRAME_DIR:-$FRAME_DIR}"
 EVAL_FLOW_DIR="${EVAL_FLOW_DIR:-$FLOW_DIR}"
 N_VIEWS="${N_VIEWS:-4}"
+EVAL_SIZE="${EVAL_SIZE:-256}"
+EVAL_SIZE_3D="${EVAL_SIZE_3D:-128}"
 FOLDS="${@:-0 1 2 3 4}"
 
 # The recipe of improvements 1 to 3 (see the README); the RGB stream adds the bidirectional LSTM.
@@ -48,9 +52,11 @@ for k in $FOLDS; do
     cp models/best.pt "$out/flow_best.pt"
     echo "== fold $k: predictions and fusion =="
     FRAME_DIR="$EVAL_FRAME_DIR" CKPT="$out/rgb_best.pt" OUT="$out/rgb.npz" \
-        bash predict.sh $MODEL --bidirectional --rnn_n_layers 2 --fold "$k" --n_views "$N_VIEWS"
+        bash predict.sh $MODEL --bidirectional --rnn_n_layers 2 --fold "$k" --n_views "$N_VIEWS" \
+        --eval_size "$EVAL_SIZE"
     FRAME_DIR="$EVAL_FLOW_DIR" CKPT="$out/flow_best.pt" OUT="$out/flow.npz" \
-        bash predict.sh $MODEL --modality flow --fold "$k" --n_views "$N_VIEWS"
+        bash predict.sh $MODEL --modality flow --fold "$k" --n_views "$N_VIEWS" \
+        --eval_size "$EVAL_SIZE"
     python fuse.py --members "$out/rgb.npz" "$out/flow.npz" --names rgb flow --out "$out/fusion.json"
     if [ "$STREAMS" = "3" ]; then
         echo "== fold $k: 3D CNN stream =="
@@ -58,7 +64,8 @@ for k in $FOLDS; do
         FRAME_DIR="$FRAME_DIR" bash train.sh $RECIPE3D --fold "$k" --run_name "cv_fold${k}_3dcnn"
         cp models/best.pt "$out/3dcnn_best.pt"
         FRAME_DIR="$EVAL_FRAME_DIR" CKPT="$out/3dcnn_best.pt" OUT="$out/3dcnn.npz" \
-            bash predict.sh --model_type 3dcnn --cnn_backbone r3d_18 --fold "$k" --n_views "$N_VIEWS"
+            bash predict.sh --model_type 3dcnn --cnn_backbone r3d_18 --fold "$k" --n_views "$N_VIEWS" \
+                --eval_size "$EVAL_SIZE_3D"
         python fuse.py --members "$out/rgb.npz" "$out/flow.npz" "$out/3dcnn.npz" \
             --names rgb flow 3dcnn --out "$out/fusion3.json"
     fi

@@ -45,9 +45,12 @@ from models import LRCN, VideoCNN
 from train import train
 from evaluate import evaluate, predict, get_test_report
 
-def args_parser():
+def args_parser(argv=None):
     """
     Parse command-line arguments for configuring the video classification training or evaluation.
+
+    Args:
+        argv (list, optional): Arguments to parse instead of the command line (used by tests).
 
     Returns:
         argparse.Namespace: Parsed command-line arguments.
@@ -121,6 +124,9 @@ def args_parser():
     parser.add_argument('--n_views', type=int, default=4,
                         help='predict mode: interleaved evenly spaced clips per video whose '
                              'predictions are averaged (needs n_views * 16 stored frames)')
+    parser.add_argument('--eval_size', type=int, default=0,
+                        help='resize val/test frames to this size instead of the training '
+                             'size (0 = training size); see build_transforms')
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
     parser.add_argument('-d', '--dropout', type=float, default=0.1,
                         help='Dropout rate for regularization')
@@ -145,7 +151,7 @@ def args_parser():
     parser.add_argument('--run_name', default=None,
                         help='Weights & Biases run name (default: chosen by W&B)')
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 def load_split(fold, frame_dir, split_dir='splits'):
     """
@@ -342,11 +348,35 @@ def main(args):
         args (argparse.Namespace): Parsed command-line arguments.
     """
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    runners = {'train': run_train, 'eval': run_eval, 'predict': run_predict}
+    runners[args.mode](args, build_model(args), build_transforms(args), device)
+
+
+def build_transforms(args):
+    """
+    The (train, val/test) transforms for the model type, with the optional evaluation size.
+
+    The strong training augmentation takes a random crop of 49-100% of the frame and resizes it
+    to the training size, so on average the network trains on a zoomed-in view. The full frame
+    resized to the same size at test time shows everything smaller than in training.
+    ``--eval_size`` resizes the val/test frames to a larger size instead (256 for the LRCN
+    streams, 128 for the 3D CNN in cv.sh) to even that out; the convolutional backbones take any
+    size (global average pooling). Chosen on validation; see the README.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments.
+
+    Returns:
+        tuple: (train transforms, val/test transforms).
+    """
     h, w, mean, std = transform_stats(args.model_type)
     transforms = compose_data_transforms(h, w, mean, std, strong=args.aug == 'strong',
                                          modality=args.modality)
-    runners = {'train': run_train, 'eval': run_eval, 'predict': run_predict}
-    runners[args.mode](args, build_model(args), transforms, device)
+    if args.eval_size:
+        eval_transforms = compose_data_transforms(args.eval_size, args.eval_size, mean, std,
+                                                  modality=args.modality)
+        transforms = (transforms[0], eval_transforms[1])
+    return transforms
 
 
 if __name__ == '__main__':

@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 from torchvision.transforms import v2
 
+from run import args_parser, build_transforms
 from video_datasets import VideoDataset, collate_fn_rnn
 from utils import compose_data_transforms
 
@@ -115,3 +116,14 @@ def test_four_views_of_sixty_four_frames_are_interleaved():
         assert all(b >= a for a, b in zip(earlier, later))
         assert sum(b > a for a, b in zip(earlier, later)) >= 15
     assert len({i for v in views for i in v}) >= 60      # together they cover almost all frames
+
+
+def test_eval_size_changes_only_the_val_test_frames():
+    """--eval_size resizes val/test frames to that size; the training frames keep 224."""
+    clip = torch.zeros(2, 3, 30, 40, dtype=torch.uint8)
+    base = ['--n_classes', '50', '--batch_size', '2', '--mode', 'predict']
+    train_transforms, eval_transforms = build_transforms(args_parser(base + ['--eval_size', '256']))
+    assert tuple(train_transforms(clip).shape) == (2, 3, 224, 224)
+    assert tuple(eval_transforms(clip).shape) == (2, 3, 256, 256)
+    default = build_transforms(args_parser(base))
+    assert tuple(default[1](clip).shape) == (2, 3, 224, 224)
