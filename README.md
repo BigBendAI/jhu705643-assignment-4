@@ -3,7 +3,7 @@
 Rajbir S Chahal
 
 The assignment code implements an LRCN - a ResNet turns each frame into a feature vector, an LSTM reads the sequence of vectors, a classifier names the action.
-The code was modified to use UCF50 dataset, log to Weights & Biases, debugged and improved. The W&B project <https://wandb.ai/bigbendai/jhu705643-a4-ucf50-lrcn> has every run's train, validation and test loss and accuracy per epoch.
+The code was modified to use UCF50 dataset, log to Weights & Biases, debugged and improved. The W&B project <https://wandb.ai/bigbendai/jhu705643-a4-ucf50-lrcn> has every run's train, validation and test loss and accuracy per epoch (the project is private; screenshots of the runs table and the curves are submitted with the assignment).
 
 ## Results
 
