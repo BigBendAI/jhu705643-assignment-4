@@ -6,6 +6,9 @@
 # two-stream one. Then cv_summary.py reports the per-fold numbers and their mean.
 #   FRAME_DIR=data/frames FLOW_DIR=data/flow OUT_DIR=cv bash cv.sh 1 2 3 4
 #   FRAME_DIR=data/frames FLOW_DIR=data/flow OUT_DIR=cv STREAMS=3 bash cv.sh 0 1 2 3 4
+# Training reads FRAME_DIR / FLOW_DIR (32 stored frames per clip); prediction reads
+# EVAL_FRAME_DIR / EVAL_FLOW_DIR (64 stored frames, preprocess.py --n_frames 64) and averages
+# N_VIEWS interleaved 16-frame clips per video. They default to the training folders.
 # Each fold writes OUT_DIR/fold<k>/{rgb_best.pt, flow_best.pt, rgb.npz, flow.npz, fusion.json}
 # and, with STREAMS=3, {3dcnn_best.pt, 3dcnn.npz, fusion3.json}.
 set -e
@@ -13,6 +16,9 @@ FRAME_DIR="${FRAME_DIR:-data/frames}"
 FLOW_DIR="${FLOW_DIR:-data/flow}"
 OUT_DIR="${OUT_DIR:-cv}"
 STREAMS="${STREAMS:-2}"
+EVAL_FRAME_DIR="${EVAL_FRAME_DIR:-$FRAME_DIR}"
+EVAL_FLOW_DIR="${EVAL_FLOW_DIR:-$FLOW_DIR}"
+N_VIEWS="${N_VIEWS:-4}"
 FOLDS="${@:-0 1 2 3 4}"
 
 # The recipe of improvements 1 to 3 (see the README); the RGB stream adds the bidirectional LSTM.
@@ -41,18 +47,18 @@ for k in $FOLDS; do
         --run_name "cv_fold${k}_flow"
     cp models/best.pt "$out/flow_best.pt"
     echo "== fold $k: predictions and fusion =="
-    FRAME_DIR="$FRAME_DIR" CKPT="$out/rgb_best.pt" OUT="$out/rgb.npz" \
-        bash predict.sh $MODEL --bidirectional --rnn_n_layers 2 --fold "$k"
-    FRAME_DIR="$FLOW_DIR" CKPT="$out/flow_best.pt" OUT="$out/flow.npz" \
-        bash predict.sh $MODEL --modality flow --fold "$k"
+    FRAME_DIR="$EVAL_FRAME_DIR" CKPT="$out/rgb_best.pt" OUT="$out/rgb.npz" \
+        bash predict.sh $MODEL --bidirectional --rnn_n_layers 2 --fold "$k" --n_views "$N_VIEWS"
+    FRAME_DIR="$EVAL_FLOW_DIR" CKPT="$out/flow_best.pt" OUT="$out/flow.npz" \
+        bash predict.sh $MODEL --modality flow --fold "$k" --n_views "$N_VIEWS"
     python fuse.py --members "$out/rgb.npz" "$out/flow.npz" --names rgb flow --out "$out/fusion.json"
     if [ "$STREAMS" = "3" ]; then
         echo "== fold $k: 3D CNN stream =="
         rm -rf models
         FRAME_DIR="$FRAME_DIR" bash train.sh $RECIPE3D --fold "$k" --run_name "cv_fold${k}_3dcnn"
         cp models/best.pt "$out/3dcnn_best.pt"
-        FRAME_DIR="$FRAME_DIR" CKPT="$out/3dcnn_best.pt" OUT="$out/3dcnn.npz" \
-            bash predict.sh --model_type 3dcnn --cnn_backbone r3d_18 --fold "$k"
+        FRAME_DIR="$EVAL_FRAME_DIR" CKPT="$out/3dcnn_best.pt" OUT="$out/3dcnn.npz" \
+            bash predict.sh --model_type 3dcnn --cnn_backbone r3d_18 --fold "$k" --n_views "$N_VIEWS"
         python fuse.py --members "$out/rgb.npz" "$out/flow.npz" "$out/3dcnn.npz" \
             --names rgb flow 3dcnn --out "$out/fusion3.json"
     fi

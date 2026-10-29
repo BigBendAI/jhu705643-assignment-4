@@ -40,17 +40,22 @@ class VideoDataset(Dataset):
             stored frames are cut into fr_per_vid equal segments and one frame is drawn at random
             from each segment every time the clip is loaded, so each epoch trains on a different
             clip of the same video (training). Default is False.
-        shifted (bool, optional): With random_clip False, take the evenly spaced positions half a
-            step later: the second of two interleaved clips of a video, used by predict mode to
-            average the predictions over two clips as the paper does. Default is False.
+        view (int, optional): With random_clip False, which of n_views interleaved evenly spaced
+            clips of the video to take: view 0 starts at the first stored frame, view k starts
+            k / n_views of a step later. Predict mode averages the predictions over all views,
+            as the paper averages over clips of a video. Default is 0.
+        n_views (int, optional): Number of interleaved clips. Default is 4.
     """
-    def __init__(self, vid_dataset, fr_per_vid, transforms=None, random_clip=False,
-                 shifted=False):
+    def __init__(self, vid_dataset, fr_per_vid, transforms=None, random_clip=False, view=0,
+                 n_views=4):
+        if not 0 <= view < n_views:
+            raise ValueError('view must be between 0 and n_views - 1')
         self.dataset = vid_dataset
         self.fpv = fr_per_vid
         self.transforms = transforms
         self.random_clip = random_clip
-        self.shifted = shifted
+        self.view = view
+        self.n_views = n_views
 
     def frame_indices(self, n_stored):
         """
@@ -62,12 +67,13 @@ class VideoDataset(Dataset):
         Returns:
             ndarray: fr_per_vid indices in increasing order.
         """
-        if n_stored <= self.fpv or not (self.random_clip or self.shifted):
+        if n_stored <= self.fpv or not (self.random_clip or self.view):
             # Evenly spaced; repeats when fewer frames are stored, so every clip has the length.
             return np.linspace(0, n_stored - 1, self.fpv).round().astype(int)
         if not self.random_clip:
-            # The same spacing, started half a step later (never past the last frame).
-            positions = np.linspace(0, n_stored - 1, self.fpv) + (n_stored - 1) / (2 * self.fpv)
+            # The same spacing, started view / n_views of a step later (never past the last frame).
+            positions = (np.linspace(0, n_stored - 1, self.fpv)
+                         + self.view * (n_stored - 1) / (self.n_views * self.fpv))
             return np.minimum(positions.round().astype(int), n_stored - 1)
         # One random frame per segment. torch's random generator is seeded per DataLoader
         # worker, so the workers do not all draw the same frames.

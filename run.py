@@ -22,8 +22,8 @@ parameters, and training hyperparameters. Depending on the selected mode ('train
 
 - Predict mode:
     - Like eval, but saves the softmax probabilities of the checkpoint on the validation and the
-      test set to an .npz file (averaged over two interleaved clips per video, as the paper
-      averages over clips), the input of the two-stream fusion in fuse.py.
+      test set to an .npz file (averaged over interleaved clips per video, as the paper averages
+      over clips), the input of the two-stream fusion in fuse.py.
 
 The module also includes a helper function for parsing command-line arguments.
 """
@@ -118,6 +118,9 @@ def args_parser():
                         help="'train', 'eval' (test accuracy) or 'predict' (save probabilities)")
     parser.add_argument('--predictions', default='predictions.npz',
                         help='where --mode predict saves the val/test probabilities')
+    parser.add_argument('--n_views', type=int, default=4,
+                        help='predict mode: interleaved evenly spaced clips per video whose '
+                             'predictions are averaged (needs n_views * 16 stored frames)')
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
     parser.add_argument('-d', '--dropout', type=float, default=0.1,
                         help='Dropout rate for regularization')
@@ -302,7 +305,7 @@ def run_predict(args, model, transforms, device):
     """
     Predict mode: save the checkpoint's softmax probabilities on val and test for fuse.py.
 
-    The probabilities are averaged over the two interleaved 16-frame clips of each video, as
+    The probabilities are averaged over n_views interleaved 16-frame clips of each video, as
     the paper averages its predictions over clips.
 
     Args:
@@ -316,12 +319,13 @@ def run_predict(args, model, transforms, device):
     saved = {'class_names': np.array(sorted(os.listdir(args.frame_dir))), 'ckpt': args.ckpt}
     for name in ('val', 'test'):
         probs = 0
-        for shifted in (False, True):
-            dataset = VideoDataset(splits[name], args.fr_per_vid, transforms[1], shifted=shifted)
+        for view in range(args.n_views):
+            dataset = VideoDataset(splits[name], args.fr_per_vid, transforms[1], view=view,
+                                   n_views=args.n_views)
             loader = test_dloaders(dataset, args.batch_size, args.model_type,
                                    args.num_workers)['test']
             clip_probs, targets = predict(model, loader, device)
-            probs = probs + clip_probs / 2
+            probs = probs + clip_probs / args.n_views
         saved[f'probs_{name}'], saved[f'targets_{name}'] = probs, targets
         saved[f'clips_{name}'] = np.array([os.path.relpath(path, args.frame_dir)
                                            for path, _ in splits[name]])

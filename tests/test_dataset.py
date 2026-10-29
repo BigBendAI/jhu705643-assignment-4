@@ -91,15 +91,27 @@ def test_collate_stacks_clips(frames):
     assert labels.tolist() == [0, 1]
 
 
-def test_shifted_clip_is_interleaved(frames):
-    """With 32 stored frames, the shifted clip takes the second frame of each pair."""
+def test_interleaved_views(frames):
+    """With 32 stored frames and 2 views, view 1 takes the second frame of each pair."""
     clip_list = [(str(frames / 'A' / 'v_A_g01_c01'), 0)]
     first = red_levels(VideoDataset(clip_list, 16)[0][0])
-    second = red_levels(VideoDataset(clip_list, 16, shifted=True)[0][0])
+    second = red_levels(VideoDataset(clip_list, 16, view=1, n_views=2)[0][0])
     assert first == [round(i * 31 / 15) for i in range(16)]
     assert all(b >= a for a, b in zip(first, second)) and second[-1] == 31
     assert sum(b > a for a, b in zip(first, second)) == 15   # only the last frame coincides
-    # with no spare frames the shifted clip equals the plain one
+    # with no spare frames every view equals the plain clip
     short = [(str(frames / 'A' / 'v_A_g01_c02'), 0)]
-    assert (red_levels(VideoDataset(short, 16, shifted=True)[0][0])
+    assert (red_levels(VideoDataset(short, 16, view=3, n_views=4)[0][0])
             == red_levels(VideoDataset(short, 16)[0][0]))
+    with pytest.raises(ValueError):
+        VideoDataset(clip_list, 16, view=4, n_views=4)
+
+
+def test_four_views_of_sixty_four_frames_are_interleaved():
+    """With 64 stored frames, the 4 views are 16 distinct frames each, interleaved in time."""
+    views = [VideoDataset([], 16, view=v, n_views=4).frame_indices(64) for v in range(4)]
+    assert all(len(set(v)) == 16 for v in views)
+    for earlier, later in zip(views, views[1:]):
+        assert all(b >= a for a, b in zip(earlier, later))
+        assert sum(b > a for a, b in zip(earlier, later)) >= 15
+    assert len({i for v in views for i in v}) >= 60      # together they cover almost all frames
